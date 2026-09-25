@@ -1,0 +1,23 @@
+---
+claimed_at: 2026-09-25T23:52:32Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-25T23:52:32Z
+created: 2026-09-25T23:37:12Z
+id: 2
+priority: high
+started: 2026-09-25T23:37:42Z
+status: done
+tags:
+- measure
+title: 'Messung: PSI/meminfo/zram lesen + Fixtures aus ~/load-incidents'
+updated: 2026-09-25T23:52:32Z
+---
+
+Snapshot-Leser ohne Subprozesse (/proc/pressure/*, /proc/meminfo, /proc/loadavg). Parser für ~/load-incidents/*.txt, daraus Fixtures (ruhig / kippend / Thrash). Done: Tests grün.
+
+2026-09-25 23:50 Implemented lib/loadguard/snapshot.py (read_snapshot(root), parse_incident), fixtures t/fixtures/incidents (3 excerpts) + t/fixtures/proc (1 recorded, 1 reconstructed), t/test_snapshot.py; 33 tests green. Findings: snapshots have NO zram data and no labeled PSI (order io,cpu,memory from load-watchdog.sh; section title 'I/O-Druck' is misleading). free -m Swap = zram 3.2 GB + /swapfile 8 GB, not '11 GB zram' as design.md says. zram is ~98% full even when calm (live 2026-09-26) -> zram fill alone is no thrash signal. MemAvailable stays 1.1-1.7 GB even during thrash -> weak signal. Two regimes: Sep 9-21 memory thrash (mem full 45-85%), Sep 25-26 CPU-bound (cpu some 70-96%, mem PSI ~0). Hook not wired (k4).
+
+2026-09-25 23:50 Ready for review: snapshot reader + incident parser + fixtures, tests green, not committed
+
+2026-09-25 23:52 Committed afcb9f9: lib/loadguard/snapshot.py (read_snapshot, parse_incident) + fixtures + 21 tests, CHANGELOG entry added.
