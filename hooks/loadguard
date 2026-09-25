@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+# loadguard — PreToolUse hook on Bash.
+#
+# Stage 0 (this file): pass-through skeleton. It reads the payload and
+# decides nothing: no stdout, exit 0, which Claude Code treats as "no
+# decision" — the normal permission flow applies, the command runs as is.
+#
+# Fail open: whatever goes wrong in here (empty stdin, broken JSON, missing
+# fields, an exception) ends in exit 0 with nothing on stdout. A broken guard
+# must never block the shell calls of every session on the host.
+#
+# Cheap: stdlib only, never forks — it runs before every Bash call.
+
+import json
+import sys
+
+
+def bash_command(payload):
+    """The command of a Bash PreToolUse payload, or None if it is not one."""
+    if not isinstance(payload, dict) or payload.get("tool_name") != "Bash":
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    return command if isinstance(command, str) else None
+
+
+def main():
+    raw = sys.stdin.buffer.read()
+    if not raw.strip():
+        return
+    bash_command(json.loads(raw))
+    # No decision yet: stay silent.
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as e:  # noqa: BLE001 — fail open on anything
+        try:
+            sys.stderr.write("loadguard: pass-through (%s)\n" % type(e).__name__)
+        except BaseException:
+            pass
+    sys.exit(0)

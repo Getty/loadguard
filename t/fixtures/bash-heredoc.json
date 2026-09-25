@@ -1,0 +1,16 @@
+{
+  "session_id": "0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55",
+  "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
+  "transcript_path": "/home/getty/.claude/projects/-home-getty-dev-loadguard/0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55.jsonl",
+  "cwd": "/home/getty/dev/loadguard",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat > /tmp/x.txt <<'EOF'\nline with 'single' and \"double\" quotes\n$HOME stays literal\nEOF\ncd /tmp && wc -l x.txt && (echo sub; exit 0)",
+    "description": "Write a file via heredoc",
+    "timeout": 120000,
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_01BASHHEREDOC"
+}

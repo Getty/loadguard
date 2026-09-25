@@ -1,0 +1,18 @@
+{
+  "session_id": "0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55",
+  "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
+  "transcript_path": "/home/getty/.claude/projects/-home-getty-dev-loadguard/0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55.jsonl",
+  "cwd": "/home/getty/dev/loadguard",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls -la",
+    "description": "List files",
+    "timeout": 120000,
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_01BASHSUBAGENT",
+  "agent_id": "a1b2c3",
+  "agent_type": "loadguard-worker"
+}
