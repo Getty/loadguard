@@ -25,6 +25,7 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | `.claude-plugin/plugin.json` | Plugin-Manifest |
 | `hooks/hooks.json`, `hooks/loadguard` | Hook-Registrierung und -Einstieg |
 | `bin/loadguard` | CLI (`status`, `doctor`, `explain`) |
+| `lib/loadguard/` | Gemeinsamer Code für Hook und CLI (`snapshot.py`: Messung) |
 | `t/` | Tests (`python3 -m unittest discover -s t -v`), Fixtures aus `~/load-incidents/` |
 
 Sprache Python 3, nur stdlib — wie `~/dev/briefing`, das als Referenz für

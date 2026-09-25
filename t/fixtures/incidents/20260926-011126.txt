@@ -1,0 +1,15 @@
+=== loadavg ===
+35.72 32.20 23.46 34/878 2538680
+
+=== Speicher ===
+               total        used        free      shared  buff/cache   available
+Mem:            7837        6558         693          14        1470        1279
+Swap:          11327        7204        4123
+
+=== I/O-Druck (PSI) ===
+some avg10=1.72 avg60=3.70 avg300=2.55 total=1971650677
+full avg10=0.00 avg60=0.06 avg300=0.05 total=1419223326
+some avg10=96.30 avg60=95.32 avg300=93.65 total=19093853911
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+some avg10=10.42 avg60=6.10 avg300=3.66 total=691463010
+full avg10=0.74 avg60=0.35 avg300=0.20 total=422601491
