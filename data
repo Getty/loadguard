@@ -1,0 +1,23 @@
+---
+class: standard
+completed: 2026-09-25T23:46:04Z
+created: 2026-09-25T23:37:10Z
+id: 1
+priority: high
+started: 2026-09-25T23:37:40Z
+status: done
+tags:
+- hook
+title: 'Hook-Grundgerüst: Fail-open-Pass-through + Payload-Fixtures'
+updated: 2026-09-25T23:46:04Z
+---
+
+hooks/hooks.json + hooks/loadguard (Python stdlib). Liest PreToolUse-Payload, gibt ihn unverändert durch, exit 0 bei jedem Fehler. Hook-Timeout setzen. Aufgezeichnete Payloads als Fixtures in t/. Feldnamen gegen https://code.claude.com/docs/en/hooks verifizieren. Done: Tests grün, Hook getestet per stdin-Payload — NICHT in ~/.claude installieren.
+
+2026-09-25 23:42 Docs checked (code.claude.com/docs/en/hooks, 2026-09-26): input has session_id, cwd, hook_event_name, tool_name, tool_input{command,description,timeout,run_in_background}, tool_use_id, plus transcript_path, permission_mode, prompt_id, scratchpad_dir, agent_id/agent_type (subagent only). Output hookSpecificOutput{hookEventName, permissionDecision allow|deny|ask, permissionDecisionReason, updatedInput, additionalContext}. Exit 0 + empty stdout = pass-through (normal permission flow, not an approval). Hook timeout in seconds, default 600 for command hooks; on timeout output is discarded and the tool call proceeds (blocks only for Agent-SDK callback hooks). Docs do NOT say whether updatedInput replaces or merges; skill says 'send whole input' - unverified, pin before Stufe 1.
+
+2026-09-25 23:43 Implemented: hooks/hooks.json (PreToolUse/Bash, timeout 5 s), hooks/loadguard (fail-open pass-through, silent stdout, exit 0 always, stderr one line on error), t/fixtures/ (10 payloads, RECONSTRUCTED from docs, not recorded - see t/fixtures/README.md), t/test_hook_passthrough.py (12 tests green). plugin.json already existed from scaffold, left untouched. Findings: (1) 30 ms target not reachable per call with python3 on reuben right now: bare interpreter startup 35-140 ms, whole hook median 183 ms / p90 346 ms at loadavg 11 - startup-dominated, not code. Needs a design decision (accept, -S/-I shebang, or a non-Python front). (2) updatedInput replace-vs-merge undocumented - pin before Stufe 1. (3) permissionDecision 'ask' is documented; design only mentions allow/deny. (4) On timeout Claude Code discards hook output and runs the command, so a hung hook fails open but costs up to 5 s per Bash call.
+
+2026-09-25 23:43 Stage-0 hook skeleton done, tests green, not committed
+
+2026-09-25 23:46 Committed 8b55f32: Add fail-open PreToolUse Bash hook skeleton with payload fixtures (k1). Tests re-run green (12/12).
