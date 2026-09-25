@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.claude/settings.local.json
+
+# karr materialized task view -- never commit
+tasks/
+config.yml

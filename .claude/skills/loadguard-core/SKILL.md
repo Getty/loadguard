@@ -1,0 +1,72 @@
+---
+name: loadguard-core
+description: Use when changing loadguard's hook, CLI, thresholds or tests — the hook contract, the measurement sources, the systemd scope wrapping and the invariants that keep a guard on every Bash call cheap and safe.
+user-invocable: false
+---
+
+# loadguard — core
+
+loadguard is a Claude Code plugin: a `PreToolUse` hook on `Bash` that confines, limits
+and, under pressure, refuses AI-issued shell commands, and tells the model why. Design
+and rationale: `docs/design.md`. This skill holds what an implementer must not get
+wrong.
+
+## Hook contract (Claude Code)
+
+- Input: JSON on stdin — `hook_event_name`, `session_id`, `cwd`, `tool_name`,
+  `tool_input.command`, `tool_input.run_in_background`, …
+- Output on stdout, exit 0:
+  `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision":
+  "allow"|"deny"|"ask", "permissionDecisionReason": "…", "updatedInput": {…}}}`.
+  `updatedInput` replaces the tool input — send the **whole** input back, not a diff.
+- The deny reason is shown to the model. It is loadguard's only voice: short,
+  numbers, one concrete alternative.
+- Field names drift between Claude Code versions. Before relying on one, confirm it
+  against https://code.claude.com/docs/en/hooks (or ask the `claude-code-guide`
+  agent) and pin what you verified in a test fixture.
+- `allow` skips the user's permission prompt. loadguard must never grant what the
+  user's settings would not: when rewriting without an opinion on permission, omit
+  `permissionDecision` rather than sending `allow`.
+
+## Invariants
+
+1. **Fail open.** Any internal error, unreadable `/proc` file, missing systemd →
+   pass the command through untouched and exit 0. A broken guard must never brick
+   every session on the host.
+2. **Cheap.** Runs before every Bash call of every session. No subprocess in the
+   normal path (read `/proc` directly — no `jq`, `ps`, `free`), stdlib only,
+   target < 30 ms.
+3. **Light commands are never refused.** The model must always be able to look
+   (`git status`, `ls`, `cat`, `karr show`, `loadguard status`).
+4. **The wrap is transparent.** Exit code, stdout/stderr, working directory, env and
+   `run_in_background` behave as without loadguard. Quoting of the original command
+   is the dangerous part — test heredocs, quotes, `&&` chains, `cd`, subshells.
+5. **Zero context cost when calm.** No SessionStart/UserPromptSubmit output unless
+   pressure is elevated.
+
+## Measurement sources (Linux)
+
+| Source | Holds |
+|---|---|
+| `/proc/pressure/{memory,io,cpu}` | `some`/`full avg10 avg60 avg300 total` — PSI, the primary signal |
+| `/proc/meminfo` | `MemAvailable`, `SwapTotal`, `SwapFree` (zram fill) |
+| `/proc/loadavg` | load — secondary, misleading with D-state pile-ups |
+| `/sys/fs/cgroup/<scope>/memory.peak`, `memory.events` | what a finished wrapped command actually used / whether it hit `oom_kill` |
+
+`cpu some` is routinely high on reuben and is not an emergency on its own; memory
+`full` and zram fill are what precede the thrash reboots.
+
+## Confinement
+
+`systemd-run --user --scope -q -p MemoryHigh= -p MemoryMax= -p MemorySwapMax=
+-p CPUWeight= -p IOWeight= -- …` — verified working on reuben (memory controller
+delegated to `user@1000.service`). Check delegation once per boot
+(`/sys/fs/cgroup/user.slice/user-$UID.slice/user@$UID.service/cgroup.controllers`),
+cache the answer under `$XDG_RUNTIME_DIR/loadguard/`.
+
+## Testing
+
+Unit-test the decision function on recorded snapshots: turn files from
+`~/load-incidents/` into fixtures (PSI + meminfo + command → expected decision).
+Never generate real memory pressure on reuben to test — it is the machine this
+plugin protects, and it has 8 GB.
