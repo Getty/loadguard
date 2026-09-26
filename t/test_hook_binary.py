@@ -3,7 +3,7 @@
 setUpClass builds two binaries into a temporary directory:
   hook    the production main, flags FLAGS + -Werror
   driver  -DLOADGUARD_TEST, flags TEST_FLAGS (-Werror, ASan, UBSan): exposes
-          the payload extraction and the updatedInput builder
+          the payload extraction
 Without a C compiler every test here is skipped, with the reason.
 """
 
@@ -29,7 +29,7 @@ VALID = ("bash-plain.json", "bash-heredoc.json", "bash-background.json",
          "not-an-object.json", "empty.json")
 INVALID = ("broken.json", "invalid-utf8.json")
 
-# A command with everything the rewrite must carry over byte for byte.
+# A command with everything the extraction must carry over byte for byte.
 NASTY = ("cd '/tmp/a b' && cat <<'EOF' > \"out file\"\n"
          "'single' \"double\" `backtick` $HOME ${X:-y} \\ \\\\ \\n \\\"\n"
          "EOF\n"
@@ -187,53 +187,6 @@ class Extraction(Binary):
                 proc = self.command(stdin)
                 self.assertEqual((proc.returncode, proc.stdout), (1, b""),
                                  proc.stderr)
-
-
-class UpdatedInput(Binary):
-    """updatedInput replaces tool_input (k7): every key stays, only command changes."""
-
-    def updated(self, stdin, command):
-        proc = self.run_bin([self.driver, "updated-input", command], stdin)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stderr, b"")
-        return json.loads(proc.stdout.decode("utf-8"))
-
-    def assert_only_command_swapped(self, tool_input, out, command):
-        self.assertEqual(list(out), list(tool_input))  # same keys, same order
-        self.assertEqual(out, dict(tool_input, command=command))
-
-    def test_recorded_k7_payloads(self):
-        for probe in ("probe-a", "probe-c"):
-            with self.subTest(probe=probe):
-                pre = read_fixture(probe + ".pre.json", UPDATED)
-                post = json.loads(read_fixture(probe + ".post.json", UPDATED))
-                tool_input = json.loads(pre)["tool_input"]
-                self.assertIn("description", tool_input)
-                self.assertIn("timeout", tool_input)
-                new = post["tool_input"]["command"]
-                self.assert_only_command_swapped(
-                    tool_input, self.updated(pre, new), new)
-
-    def test_recorded_minimal_payloads(self):
-        for name in ("bash-plain.json", "bash-background.json",
-                     "bash-heredoc.json", "bash-subagent.json"):
-            with self.subTest(fixture=name):
-                stdin = read_fixture(name)
-                tool_input = json.loads(stdin)["tool_input"]
-                self.assert_only_command_swapped(
-                    tool_input, self.updated(stdin, NASTY), NASTY)
-
-    def test_roundtrip_nasty_both_ways(self):
-        tool_input = {"command": NASTY, "description": "Zeige \"ü\" \\ 😀",
-                      "timeout": 120000, "run_in_background": True,
-                      "extra": {"list": [1, 2.5, -0.0, None, False, "\u2028"],
-                                "empty": {}, "ünï": "\x1f"}}
-        for ensure_ascii in (True, False):
-            for new in (NASTY, "", "sh -c " + json.dumps(NASTY), "😀"):
-                with self.subTest(ensure_ascii=ensure_ascii, new=new[:20]):
-                    out = self.updated(bash_payload(tool_input, ensure_ascii),
-                                       new)
-                    self.assert_only_command_swapped(tool_input, out, new)
 
 
 if __name__ == "__main__":

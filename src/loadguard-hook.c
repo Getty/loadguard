@@ -12,9 +12,13 @@
  * Cheap: no fork, no exec, no file other than stdin. JSON only via the
  * vendored cJSON (vendor/cJSON/) — commands carry escapes, heredocs, Unicode.
  *
+ * Commands are never rewritten (k3): confinement is per session, done on
+ * SessionStart (hooks/loadguard-confine). This hook only stays silent or,
+ * from k4 on, denies.
+ *
  * Built with -DLOADGUARD_TEST, main() is swapped for a test driver that
- * exposes the extraction and the updatedInput builder (t/test_hook_binary.py);
- * the production binary has no test mode.
+ * exposes the extraction (t/test_hook_binary.py); the production binary has
+ * no test mode.
  */
 
 #include <errno.h>
@@ -78,7 +82,7 @@ static char *read_stdin(size_t *len)
 
 /*
  * Well-formed UTF-8 without NUL bytes. cJSON checks neither: a stray byte
- * would be copied verbatim into updatedInput, a NUL would end the text early.
+ * would reach a deny reason verbatim, a NUL would end the text early.
  */
 static int valid_utf8(const unsigned char *s, size_t n)
 {
@@ -143,27 +147,6 @@ static const cJSON *bash_tool_input(const cJSON *payload)
     return input;
 }
 
-/*
- * updatedInput for a rewrite: updatedInput REPLACES tool_input (k7), so it is
- * a deep copy of every key the model set with only command swapped. The
- * caller owns the result; NULL if out of memory.
- * Unused until k3 wraps commands; exercised by the test driver.
- */
-__attribute__((unused))
-static cJSON *updated_input(const cJSON *tool_input, const char *command)
-{
-    cJSON *copy = cJSON_Duplicate(tool_input, 1);
-    cJSON *cmd = cJSON_CreateString(command);
-
-    if (copy == NULL || cmd == NULL ||
-        !cJSON_ReplaceItemInObjectCaseSensitive(copy, "command", cmd)) {
-        cJSON_Delete(copy);
-        cJSON_Delete(cmd);
-        return NULL;
-    }
-    return copy;
-}
-
 #ifndef LOADGUARD_TEST
 
 static void note(const char *why)
@@ -210,8 +193,7 @@ int main(void)
 
 /*
  * Test driver, payload on stdin:
- *   command              print tool_input.command verbatim
- *   updated-input CMD    print updatedInput with command CMD as JSON
+ *   command    print tool_input.command verbatim
  * Exit 1 if the payload is not a Bash payload with a command, 64 on usage.
  */
 int main(int argc, char **argv)
@@ -227,16 +209,6 @@ int main(int argc, char **argv)
         fputs(cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
               stdout);
         rc = 0;
-    } else if (input != NULL && argc == 3 &&
-               strcmp(argv[1], "updated-input") == 0) {
-        cJSON *out = updated_input(input, argv[2]);
-        char *text = out ? cJSON_PrintUnformatted(out) : NULL;
-        if (text != NULL) {
-            fputs(text, stdout);
-            rc = 0;
-        }
-        cJSON_free(text);
-        cJSON_Delete(out);
     } else if (input != NULL) {
         rc = 64;
     }
