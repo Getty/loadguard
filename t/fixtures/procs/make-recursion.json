@@ -1,0 +1,91 @@
+{
+ "comment": "Session B (idle-sessions) runs a MakeMaker `make test` that recurses into xs/. Busy: 1.",
+ "processes": [
+  {
+   "pid": 5200,
+   "ppid": 5100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'make test' && pwd -P >| /tmp/claude-5c3f-cwd"
+   ]
+  },
+  {
+   "pid": 5201,
+   "ppid": 5200,
+   "comm": "make",
+   "argv": [
+    "make",
+    "test"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5202,
+   "ppid": 5201,
+   "comm": "sh",
+   "argv": [
+    "/bin/sh",
+    "-c",
+    "cd xs && make test LINKTYPE=\"dynamic\""
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo/xs"
+  },
+  {
+   "pid": 5203,
+   "ppid": 5202,
+   "comm": "make",
+   "argv": [
+    "make",
+    "test",
+    "LINKTYPE=dynamic"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo/xs"
+  },
+  {
+   "pid": 5204,
+   "ppid": 5201,
+   "comm": "sh",
+   "argv": [
+    "/bin/sh",
+    "-c",
+    "PERL_DL_NONLAZY=1 \"/usr/bin/perl\" \"-MExtUtils::Command::MM\" \"-MTest::Harness\" \"-e\" \"undef *Test::Harness::Switches; test_harness(0, 'blib/lib', 'blib/arch')\" t/*.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5205,
+   "ppid": 5204,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "-MExtUtils::Command::MM",
+    "-MTest::Harness",
+    "-e",
+    "undef *Test::Harness::Switches; test_harness(0, 'blib/lib', 'blib/arch')",
+    "t/00-load.t",
+    "t/10-api.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5206,
+   "ppid": 5205,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "t/10-api.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  }
+ ]
+}

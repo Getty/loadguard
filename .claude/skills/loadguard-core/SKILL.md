@@ -25,7 +25,10 @@ wrong.
   checked against the **rewritten** command (k3, live): a rewrite breaks the
   user's allow rules. k7's opposite reading came from `echo`, which is auto-approved.
 - The deny reason is shown to the model. It is loadguard's only voice: short,
-  numbers, one concrete alternative.
+  numbers, one concrete alternative. Print the JSON without a trailing newline
+  (the form k7 recorded working).
+- A timed-out hook does **not** block the command (docs, checked k4): a slow hook
+  is a pass-through, so the deny path must be the fast one.
 - Field names drift between Claude Code versions. Before relying on one, confirm it
   against https://code.claude.com/docs/en/hooks (or ask the `claude-code-guide`
   agent) and pin what you verified in a test fixture.
@@ -42,6 +45,9 @@ wrong.
    normal path (read `/proc` directly — no `jq`, `ps`, `free`), target < 30 ms.
    The hook path is C with vendored cJSON (Python startup alone costs ~180 ms on
    reuben); CLI and tests are Python stdlib. No binary yet → pass through.
+   A light command reads nothing but stdin. Under memory pressure never read
+   another process's `/proc/<pid>/cmdline`: it faults swapped pages in and can
+   outlast the timeout — which lets the heavy command run.
 3. **Light commands are never refused.** The model must always be able to look
    (`git status`, `ls`, `cat`, `karr show`, `loadguard status`).
 4. **Commands are never rewritten.** Exit code, stdout/stderr, working directory,
@@ -58,6 +64,7 @@ wrong.
 | `/proc/pressure/{memory,io,cpu}` | `some`/`full avg10 avg60 avg300 total` — PSI, the primary signal |
 | `/proc/meminfo` | `MemAvailable`, `SwapTotal`, `SwapFree` (total swap: zram + swapfile) |
 | `/proc/loadavg` | load — secondary, misleading with D-state pile-ups |
+| `/proc/<pid>/{cgroup,stat,cmdline,cwd}` | slot scan: in `app-loadguard.slice`?, ppid (after the **last** `)` — comm holds spaces), argv, where |
 | `/sys/fs/cgroup/<scope>/memory.peak`, `memory.events` | what a finished wrapped command actually used / whether it hit `oom_kill` |
 
 `cpu some` is routinely high on reuben and is not an emergency on its own. Memory
@@ -87,9 +94,29 @@ returns 0 — sibling SessionStart hooks do exactly that. Confirm via
 (synchronous, needs `Delegate=yes`; one gone PID fails the batch → per PID). No
 second start: same name is "already loaded" until collected.
 
+## Throttle (k4)
+
+In `src/loadguard-hook.c`: heavy incoming command **and** (memory `full avg10` ≥
+`LOADGUARD_PSI_FULL` 10 **or** swap used ≥ `LOADGUARD_SWAP_USED` 90 **or** running
+heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTTLE=0`
+→ pass-through. Thresholds come from the 54 snapshots (calm full ≤ 2.03 %, swap ≤
+68 %; thrash full ≥ 45.47 %, swap ≥ 92 %); retune only against them
+(`t/test_throttle.py` `Calibration`).
+
+- Incoming: match in command position (after `;` `&&` `|` newline, `VAR=x`,
+  `nice`/`timeout`/`env` …), never a substring — quotes, comments and heredoc
+  bodies are not commands. Unsure → light.
+- Running: judge argv, not text — argv[0] basename, an interpreter's script,
+  never inline code (`bash -c`, `perl -e`: that is Claude Code's wrapper). Count
+  only the topmost heavy process of a chain in the slice. `claude -p`/`--bg`
+  are heavy to start but hold no slot.
+
 ## Testing
 
 Unit-test the decision function on recorded snapshots: turn files from
 `~/load-incidents/` into fixtures (PSI + meminfo + command → expected decision).
+The test driver (`-DLOADGUARD_TEST`) runs the real decision against a fixture
+root (`decide ROOT`, `slots ROOT`, `measure ROOT`, `heavy`); running processes are
+JSON specs in `t/fixtures/procs/`. The production binary has no root override.
 Never generate real memory pressure on reuben to test — it is the machine this
 plugin protects, and it has 8 GB.

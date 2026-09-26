@@ -1,0 +1,41 @@
+{
+ "comment": "The nested `claude -p` of claude-p runs `prove -l t/foo.t`. With claude-p: busy 1 (the prove).",
+ "processes": [
+  {
+   "pid": 4310,
+   "ppid": 4301,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'prove -l t/foo.t' && pwd -P >| /tmp/claude-4e0c-cwd"
+   ]
+  },
+  {
+   "pid": 4311,
+   "ppid": 4310,
+   "comm": "prove",
+   "argv": [
+    "/usr/bin/perl",
+    "/usr/bin/prove",
+    "-l",
+    "t/foo.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4312,
+   "ppid": 4311,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "t/foo.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  }
+ ]
+}

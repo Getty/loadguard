@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- The PreToolUse hook now refuses heavy commands, with a reason for the model
+  (k4). Heavy: `prove`, `make … test`, `dzil test|build|release`, `cpanm`,
+  `docker|podman build|run`, `cargo build|test`, `npm test`, `perlbench`,
+  `claude -p|--print|--bg` — matched in command position (after `;`, `&&`,
+  `|`, newlines, `VAR=x`, `nice`/`timeout`/`env` …), not in quotes, comments
+  or heredoc bodies. A heavy command is refused when memory PSI `full avg10`
+  is at least 10 % or all swap at least 90 % used, or when `max(1, nproc/2)`
+  heavy commands already run in confined sessions (`app-loadguard.slice`,
+  every session). Running commands are counted by one pass over `/proc`,
+  judged by argv (an interpreter's script, never Claude Code's `bash -c`
+  wrapper text or npm's process title as raw text) and only the topmost heavy
+  process of a chain, so `prove` with its perl children or a recursive
+  `make test` hold one slot; a nested `claude -p`/`--bg` holds none. Under
+  memory pressure the hook does not read other processes at all — their
+  cmdline may have to come back from swap, and a timed-out hook would let the
+  command run. The reason, in English, gives the figures (PSI vs limit, swap,
+  zram as information, busy/total slots and who holds them, e.g.
+  `prove -lr t/ in ~/dev/sunriser`) and an alternative (wait; `prove -l
+  t/foo.t` instead of `-r`; no new `claude -p`). Light commands still read
+  nothing but stdin. Thresholds from the 54 incident snapshots: calm memory
+  `full avg10` <= 2.03 % and swap <= 68 %, thrash >= 45.47 % and >= 92 %.
+  Tunable through `LOADGUARD_PSI_FULL`, `LOADGUARD_SWAP_USED`,
+  `LOADGUARD_HEAVY_SLOTS`; `LOADGUARD_THROTTLE=0` turns refusing off. Cost on
+  reuben (297 processes): 0.53 ms median for a light command, 3.6 ms for a
+  heavy one with the full scan, 0.6 ms under pressure. Covered by 45 tests
+  against recorded and reconstructed `/proc` trees, process specs in
+  `t/fixtures/procs/` and every incident snapshot — none puts load on the
+  host.
+
 ## 0.1.1 - 2026-09-26
 
 - README.md (problem, mechanism, stages, status) and LICENSE (Artistic 2.0,

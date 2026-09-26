@@ -142,9 +142,9 @@ auch im Thrash). `cpu some` ist auf reuben routinemäßig hoch und kein Notfall.
 
 ### Stufe 3 — Ablehnen mit Begründung
 
-Bei Druck oberhalb der Schwelle (PSI memory `some avg10`, `full avg10`,
-zram-Füllgrad, freie Slots) wird ein schwerer Befehl verweigert. Die Begründung ist
-das Produkt — kurz, messbar, mit konkreter Alternative:
+Bei Druck oberhalb der Schwelle (Speichersignal oben) oder ohne freien Slot wird ein
+schwerer Befehl verweigert. Die Begründung ist das Produkt — kurz, messbar, mit
+konkreter Alternative:
 
 > loadguard: memory pressure full=38% (limit 20%), swap 97%, 2/2 heavy slots busy
 > (prove -lr t/ in ~/dev/sunriser, perlbench). Warte, oder teste gezielt
@@ -152,6 +152,90 @@ das Produkt — kurz, messbar, mit konkreter Alternative:
 
 Leichte Befehle (`git status`, `karr show`, `ls`, `cat` …) werden nie verweigert —
 sonst kann die KI nicht einmal nachsehen, was los ist.
+
+### Umgesetzt (k4): Stufe 2 + 3
+
+`src/loadguard-hook.c`, Tests `t/test_throttle.py`.
+
+- **Eine Regel, im C-Binary:** eingehender Befehl schwer **und** (Speicherdruck
+  **oder** alle Slots belegt) → Deny-JSON auf stdout, exit 0. Sonst keine Ausgabe,
+  exit 0, wie bisher. Ein leichter Befehl löst keinen einzigen Lesezugriff aus
+  (nur stdin); Test: `/proc/pressure/memory` als FIFO blockiert ihn nicht.
+- **Schwellwerte**, per Env, ganze Zahlen, `%` erlaubt, ungültig oder außerhalb
+  1–100 (Slots 1–4096) → Default:
+  `LOADGUARD_PSI_FULL` **10** (memory `full avg10` in %),
+  `LOADGUARD_SWAP_USED` **90** (Swap gesamt belegt in %),
+  `LOADGUARD_HEAVY_SLOTS` **`max(1, nproc/2)`** (CPUs der Affinität wie `nproc`;
+  reuben: 2). `LOADGUARD_THROTTLE=0` — nur genau `0` — schaltet auf reinen
+  Pass-through.
+- **Herleitung** aus den 54 Snapshots (Parser k2; Test `Calibration` baut jeden als
+  `/proc`-Baum nach und prüft die Entscheidung des Binarys):
+  ruhig 18× — full avg10 0,00–2,03 %, Swap 50,6–68,3 %;
+  Thrash 36× — full avg10 45,47–84,51 %, Swap 91,9–100 %. Ausnahmen beim Swap:
+  20260816-204258 (damals noch kein Swap) und 20260917-183232 (direkt nach einem
+  Kill: 20 % belegt, 5 GB frei, PSI noch 62,9).
+  PSI 10 liegt nahe dem geometrischen Mittel der Lücke (√(2,03 · 45,47) ≈ 9,6):
+  fünfmal über dem ruhigen Höchstwert, 4,5-mal unter dem kleinsten Thrash. Swap 90
+  liegt zwischen 68,3 und 91,9. Verknüpft mit **ODER**: PSI allein verweigert schon
+  jeden Thrash-Snapshot, Swap allein 34 von 36; kein ruhiger Snapshot erreicht eine
+  der Schwellen. Swap ≥ 90 % bei niedrigem PSI heißt: nichts mehr auszulagern, der
+  nächste große Befehl verdrängt Dateiseiten — der Weg in den Thrash, bevor PSI ihn
+  zeigt. zram erscheint nur in der Begründung. Live reuben (2026-09-26): full
+  0,01 %, Swap 51 %, zram 98 %, 297 Prozesse → nichts verweigert.
+- **Unter Druck kein Prozess-Scan.** `/proc/<pid>/cmdline` liest die
+  Argumentseiten des fremden Prozesses — im Thrash ausgelagert, der Leser wartet auf
+  Swap-IO. Ein Hook-Timeout blockiert den Befehl laut Docs **nicht**: Ein langsamer
+  Scan ließe genau den schweren Befehl durch. Der Druck-Grund nennt deshalb nur die
+  Messwerte, keine Slot-Halter. Test: eine cmdline als FIFO würde jeden Leser
+  blockieren, die Druck-Entscheidung kommt trotzdem sofort.
+- **Slot-Scan** (nur ohne Druck): ein Durchlauf über `/proc`; `cgroup` enthält
+  `/app-loadguard.slice/` → `stat` (ppid hinter der letzten `)` — comm kann
+  Leerzeichen und Klammern enthalten, npm: `npm exec claude`) und `cmdline`.
+  Beurteilt wird argv, nicht Text: Basename von argv[0]; bei Interpretern (`perl`,
+  `python3`, `node`, `sh`, `bash` …) das Skript — der Kernel startet prove als
+  `/usr/bin/perl /usr/bin/prove -lr t/`. Inline-Code (`-c`, `-e`, `-E`) ist kein
+  Skript: Der Claude-Code-Wrapper `bash -c '… eval …'` zählt nie, auch wenn sein
+  Format sich ändert. Ein Prozesstitel (npm schreibt `npm test`, mit NULs
+  aufgefüllt) wird an Leerzeichen getrennt. Es zählt nur der **oberste** schwere
+  Prozess einer Kette innerhalb der Slice: prove mit perl-Kindern, rekursives
+  `make test`, `npm test` → prove sind je ein Slot. `claude -p`/`--bg` halten
+  keinen Slot; was sie starten, zählt einzeln.
+- **Schwer (eingehend):** der String wird in einfache Befehle zerlegt (`;` `&` `|`
+  `(` `)` `` ` `` Zeilenumbruch) unter Beachtung von Quotes, Backslashes,
+  Kommentaren, Umleitungen und Heredoc-Rümpfen. Vor dem Befehlswort übersprungen:
+  `VAR=x`, `nice` `ionice` `nohup` `timeout` `env` `stdbuf` `setsid` `xargs`
+  `time` `exec` samt Optionen und Zahlen, `if` `then` `do` `!` `{` … Muster wie
+  oben, dazu `claude --print` (= `-p`). Kein Shell-Parser: Unklares fällt auf
+  leicht (`bash -c 'prove …'`, `sudo prove`, `find -exec prove`, mehr als 32
+  Wörter vor `test`) — die Session-Grenze aus Stufe 1 gilt trotzdem.
+- **Begründung** englisch, zwei Zeilen — Zahlen, dann Rat:
+
+  > loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr
+  > t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0%
+  > (limit 10%), swap 60% used (limit 90%), zram 97% full.
+  > Wait for one to finish, then retry; light commands (git status, ls, cat) still
+  > run. Or run a single test file instead of the whole suite.
+
+  Unter Druck: `…: memory pressure full=59.9% (limit 10%), swap 100% used (limit
+  90%). Wait and retry later; …`. Rat je Muster: prove → `prove -l t/foo.t` statt
+  `-r`; Testsuite → eine Testdatei; `claude -p`/`--bg` → keine neuen Sessions.
+  Höchstens drei Halter, dann `+N more`; Pfade mit `~`, Steuerzeichen und
+  ungültiges UTF-8 als `?`.
+- **Kosten** (reuben, 297 Prozesse, je 300 Läufe inkl. Prozessstart, `nice`):
+  leicht 0,53 ms Median (`/bin/true`: 0,50), schwer und ruhig mit vollem Scan
+  3,64 ms (p90 4,44), schwer unter Druck 0,62 ms. Ziel < 30 ms.
+- **Fail-open:** keine PSI-Datei, kein Swap, unlesbares `/proc` → dieses Signal
+  meldet keinen Druck; ein Prozess, der zwischen `readdir` und dem Lesen
+  verschwindet, zählt nicht. Nie exit 2, SIGPIPE ignoriert. Ausgabe ohne
+  abschließenden Zeilenumbruch — die Form, die k7 live erprobt hat.
+- **Testbarkeit:** die Wurzel für `/proc` und `/sys` gibt es nur im Testtreiber
+  (`-DLOADGUARD_TEST`: `decide ROOT`, `slots ROOT`, `measure ROOT`, `heavy`); das
+  Produktions-Binary liest immer das echte `/proc`. Laufende Prozesse kommen als
+  JSON-Specs aus `t/fixtures/procs/`. **Für k5:** ein synthetischer Payload auf
+  stdin des Produktions-Binarys liefert die Live-Entscheidung — Deny-JSON oder
+  nichts; *warum* etwas durchgeht, gibt das Binary nicht aus.
+- **Rennen, akzeptiert:** zwei Sessions im selben Moment sehen beide einen freien
+  Slot; ebenso ein Befehl, dessen schwerer Prozess noch nicht läuft.
 
 ### Stufe 4 — Lagebewusstsein (optional)
 

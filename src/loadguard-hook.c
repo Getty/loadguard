@@ -1,27 +1,61 @@
 /*
- * loadguard-hook — PreToolUse hook on Bash, the compiled path (k8).
+ * loadguard-hook — PreToolUse hook on Bash, the compiled path (k8, k4).
  *
- * Stage 0: pass-through. It reads the payload, parses it and extracts
- * tool_name / tool_input.command, then decides nothing: no stdout, exit 0,
- * which Claude Code treats as "no decision" — the command runs as is.
+ * Silent (no stdout, exit 0: the command runs as is) unless the command is
+ * heavy and the host has no room for it. Then it prints the documented deny
+ * JSON, whose reason Claude Code hands to the model — still exit 0.
+ *
+ * Heavy: a simple command of the Bash string — at its start, after ; & | ( )
+ * ` or a newline, past VAR=x assignments and prefixes like nice, timeout or
+ * env — runs prove, dzil test|build|release, make … test, cpanm,
+ * docker|podman build|run, cargo build|test, npm test, perlbench or
+ * claude -p|--print|--bg. Quotes, comments and heredoc bodies are not
+ * commands. Everything else is light and costs no read beyond stdin.
+ *
+ * No room (docs/design.md, Stufe 2/3, "Umgesetzt (k4)"):
+ *  1. memory PSI full avg10 >= LOADGUARD_PSI_FULL (10 %) or total swap used
+ *     >= LOADGUARD_SWAP_USED (90 %). Denied without scanning /proc: reading
+ *     another process's cmdline faults its argument pages in, which under
+ *     thrash can outlast the hook timeout — and a timed-out hook lets the
+ *     command run.
+ *  2. else: heavy processes already running under app-loadguard.slice (every
+ *     confined session) >= LOADGUARD_HEAVY_SLOTS (max(1, nproc/2)). One
+ *     running command is one slot: processes are judged by their argv, not
+ *     by the text of the Bash wrapper around them, and only the topmost
+ *     heavy process of a chain counts (prove's perl children, a recursive
+ *     make). claude -p/--bg sessions hold no slot; what they run does.
+ * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through.
  *
  * Fail open: whatever goes wrong (empty or oversized stdin, not UTF-8, broken
  * JSON, missing fields, out of memory) ends in exit 0 with nothing on stdout.
- * Never exit 2: that is the only code with which a hook blocks a command.
+ * An unreadable measurement counts as room: no PSI, no swap figure, no /proc
+ * entry — no objection from that source. Never exit 2: that is the only
+ * code with which a hook blocks regardless of its output.
  *
- * Cheap: no fork, no exec, no file other than stdin. JSON only via the
- * vendored cJSON (vendor/cJSON/) — commands carry escapes, heredocs, Unicode.
+ * Cheap: no fork, no exec, no file other than stdin on the light path. JSON
+ * only via the vendored cJSON (vendor/cJSON/) — commands carry escapes,
+ * heredocs, Unicode.
  *
  * Commands are never rewritten (k3): confinement is per session, done on
- * SessionStart (hooks/loadguard-confine). This hook only stays silent or,
- * from k4 on, denies.
+ * SessionStart (hooks/loadguard-confine). This hook only stays silent or
+ * denies.
  *
  * Built with -DLOADGUARD_TEST, main() is swapped for a test driver that
- * exposes the extraction (t/test_hook_binary.py); the production binary has
- * no test mode.
+ * exposes the extraction, the matcher, the measurement and the decision
+ * against a fixture root (t/test_hook_binary.py, t/test_throttle.py); the
+ * production binary reads the real /proc and has no test mode.
  */
 
+#define _GNU_SOURCE
+
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +65,12 @@
 
 /* Larger payloads pass through unparsed. */
 #define MAX_PAYLOAD ((size_t)8 << 20)
+
+/* Defaults, calibrated on ~/load-incidents (docs/design.md, k4). */
+#define PSI_FULL_DEFAULT 10     /* % memory full avg10: calm <= 2.03, thrash >= 45.47 */
+#define SWAP_USED_DEFAULT 90    /* % of all swap: calm <= 68.3, thrash >= 91.9 */
+
+#define SLICE "app-loadguard.slice"
 
 /*
  * All of stdin as a NUL-terminated heap buffer, its length in *len.
@@ -147,6 +187,887 @@ static const cJSON *bash_tool_input(const cJSON *payload)
     return input;
 }
 
+/* ------------------------------------------------------------------------
+ * Heavy commands — one classifier for the words of an incoming command and
+ * for the argv of a running process.
+ */
+
+enum kind {
+    K_NONE,
+    K_PROVE,        /* prove */
+    K_SUITE,        /* a whole test suite: make test, dzil test|release, … */
+    K_BUILD,        /* builds, installs, containers, perlbench */
+    K_CLAUDE        /* claude -p|--print|--bg: heavy to start, holds no slot */
+};
+
+struct match {
+    enum kind kind;
+    int at;             /* index of the command word in the argv judged */
+    char label[32];     /* "prove", "make test", "podman run", … */
+};
+
+static const char *const INTERPRETERS[] = {
+    "perl", "python", "python3", "node", "sh", "bash", "dash", NULL
+};
+
+static const char *base(const char *s)
+{
+    const char *slash = strrchr(s, '/');
+    return slash ? slash + 1 : s;
+}
+
+static int one_of(const char *s, const char *const *list)
+{
+    for (; *list != NULL; list++)
+        if (strcmp(s, *list) == 0)
+            return 1;
+    return 0;
+}
+
+/* The first argument that is no option (-x, --x, cargo's +toolchain). */
+static const char *subcommand(char *const *av, int ac)
+{
+    int i;
+    for (i = 1; i < ac; i++)
+        if (av[i][0] != '-' && av[i][0] != '+')
+            return av[i];
+    return "";
+}
+
+/*
+ * What argv runs, judged by its words: the basename of argv[0] and, for
+ * tools with subcommands, the first argument that is no option. An
+ * interpreter is looked through to its script — the kernel runs prove as
+ * `/usr/bin/perl /usr/bin/prove -lr t/` — but inline code (-c, -e, -E) is
+ * no script: Claude Code's `bash -c '… eval …'` wrapper is not what it runs.
+ */
+static enum kind classify(char *const *av, int ac, struct match *m)
+{
+    const char *name, *sub;
+    enum kind kind = K_NONE;
+    int at = 0, i;
+
+    if (ac < 1)
+        return K_NONE;
+    if (one_of(base(av[0]), INTERPRETERS)) {
+        for (at = 1; at < ac && av[at][0] == '-'; at++)
+            if (strcmp(av[at], "-c") == 0 || strcmp(av[at], "-e") == 0 ||
+                strcmp(av[at], "-E") == 0)
+                return K_NONE;
+        if (at == ac)
+            return K_NONE;
+    }
+    av += at;
+    ac -= at;
+    name = base(av[0]);
+    sub = subcommand(av, ac);
+
+    if (strcmp(name, "prove") == 0) {
+        kind = K_PROVE;
+        sub = "";
+    } else if (strcmp(name, "cpanm") == 0 || strcmp(name, "perlbench") == 0) {
+        kind = K_BUILD;
+        sub = "";
+    } else if (strcmp(name, "dzil") == 0) {
+        if (strcmp(sub, "build") == 0)
+            kind = K_BUILD;
+        else if (strcmp(sub, "test") == 0 || strcmp(sub, "release") == 0)
+            kind = K_SUITE;
+    } else if (strcmp(name, "make") == 0) {
+        for (i = 1; i < ac && kind == K_NONE; i++)
+            if (strcmp(av[i], "test") == 0) {
+                kind = K_SUITE;
+                sub = "test";
+            }
+    } else if (strcmp(name, "docker") == 0 || strcmp(name, "podman") == 0) {
+        if (strcmp(sub, "build") == 0 || strcmp(sub, "run") == 0)
+            kind = K_BUILD;
+    } else if (strcmp(name, "cargo") == 0) {
+        if (strcmp(sub, "build") == 0)
+            kind = K_BUILD;
+        else if (strcmp(sub, "test") == 0)
+            kind = K_SUITE;
+    } else if (strcmp(name, "npm") == 0) {
+        if (strcmp(sub, "test") == 0)
+            kind = K_SUITE;
+    } else if (strcmp(name, "claude") == 0) {
+        for (i = 1; i < ac && kind == K_NONE; i++)
+            if (strcmp(av[i], "-p") == 0 || strcmp(av[i], "--print") == 0 ||
+                strcmp(av[i], "--bg") == 0) {
+                kind = K_CLAUDE;
+                sub = av[i];
+            }
+    }
+    if (kind != K_NONE) {
+        m->kind = kind;
+        m->at = at;
+        snprintf(m->label, sizeof m->label, "%s%s%s", name,
+                 *sub ? " " : "", sub);
+    }
+    return kind;
+}
+
+/*
+ * Splitting a Bash string into simple commands. No shell parser: quotes,
+ * backslashes, comments, redirections and heredocs are followed as far as
+ * it takes to find the command word; anything unusual errs towards light.
+ */
+
+#define MAX_WORDS 32
+#define WORD_MAX 256
+#define MAX_HEREDOCS 8
+#define DELIM_MAX 64
+
+struct words {
+    int n;              /* words complete */
+    int len;            /* bytes in the open word */
+    int open;           /* a word is open ('' opens an empty one) */
+    int skip;           /* the next word is a redirection target */
+    char w[MAX_WORDS][WORD_MAX];
+};
+
+static void begin(struct words *s)
+{
+    if (!s->open) {
+        s->open = 1;
+        s->len = 0;
+    }
+}
+
+static void put(struct words *s, char c)
+{
+    begin(s);
+    if (s->n < MAX_WORDS && s->len < WORD_MAX - 1)
+        s->w[s->n][s->len++] = c;
+}
+
+static void end_word(struct words *s)
+{
+    if (!s->open)
+        return;
+    s->open = 0;
+    if (s->skip)
+        s->skip = 0;
+    else if (s->n < MAX_WORDS)
+        s->w[s->n++][s->len] = '\0';
+}
+
+/* Words in front of the command word that keep it in command position. */
+static const char *const PREFIXES[] = {
+    "!", "{", "}", "if", "then", "else", "elif", "while", "until", "do",
+    "time", "exec", "nice", "ionice", "nohup", "timeout", "env", "stdbuf",
+    "setsid", "xargs", NULL
+};
+
+static int assignment(const char *w)
+{
+    if (!isalpha((unsigned char)*w) && *w != '_')
+        return 0;
+    while (isalnum((unsigned char)*w) || *w == '_')
+        w++;
+    return *w == '=' || (w[0] == '+' && w[1] == '=');
+}
+
+/* Judge the collected simple command, then start the next one. */
+static enum kind end_command(struct words *s, struct match *m)
+{
+    char *av[MAX_WORDS];
+    int i, ac = 0, prefixed = 0;
+    enum kind kind;
+
+    end_word(s);
+    s->skip = 0;
+    for (i = 0; i < s->n; i++) {
+        const char *w = s->w[i];
+        if (assignment(w))
+            continue;
+        if (prefixed && (w[0] == '-' || isdigit((unsigned char)w[0])))
+            continue;           /* nice -n 10, timeout 5m, xargs -P4 */
+        if (one_of(w, PREFIXES)) {
+            prefixed = 1;
+            continue;
+        }
+        break;
+    }
+    for (; i < s->n; i++)
+        av[ac++] = s->w[i];
+    kind = classify(av, ac, m);
+    s->n = 0;
+    return kind;
+}
+
+/*
+ * p is at the first '<' of "<<" or "<<-". Reads the delimiter word (quotes
+ * removed) into delim; returns the last character consumed.
+ */
+static const char *heredoc_start(const char *p, char *delim, int *strip)
+{
+    size_t n = 0;
+    char quote = 0;
+
+    p += 2;
+    *strip = 0;
+    if (*p == '-') {
+        *strip = 1;
+        p++;
+    }
+    while (*p == ' ' || *p == '\t')
+        p++;
+    for (; *p != '\0'; p++) {
+        if (quote) {
+            if (*p == quote)
+                quote = 0;
+            else if (n < DELIM_MAX - 1)
+                delim[n++] = *p;
+            continue;
+        }
+        if (*p == '\'' || *p == '"') {
+            quote = *p;
+            continue;
+        }
+        if (*p == '\\' && p[1] != '\0')
+            p++;
+        else if (strchr(" \t\n;&|()<>`", *p) != NULL)
+            break;
+        if (n < DELIM_MAX - 1)
+            delim[n++] = *p;
+    }
+    delim[n] = '\0';
+    return p - 1;
+}
+
+/*
+ * p is at the newline that ends the line with the heredoc operators. Skips
+ * their bodies; returns the newline or NUL after the last delimiter line,
+ * NULL if the text ends inside a body.
+ */
+static const char *skip_heredocs(const char *p, char delims[][DELIM_MAX],
+                                 const int *strip, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        size_t want = strlen(delims[i]);
+        for (;;) {
+            const char *line, *end;
+            if (*p != '\n')
+                return NULL;
+            line = p + 1;
+            end = strchr(line, '\n');
+            if (end == NULL)
+                end = line + strlen(line);
+            p = end;
+            if (strip[i])
+                while (*line == '\t')
+                    line++;
+            if ((size_t)(end - line) == want &&
+                strncmp(line, delims[i], want) == 0)
+                break;
+        }
+    }
+    return p;
+}
+
+/* The first heavy simple command in a Bash command string, else K_NONE. */
+static enum kind heavy_command(const char *cmd, struct match *m)
+{
+    static struct words s;      /* 8 KiB, kept off the stack */
+    char delims[MAX_HEREDOCS][DELIM_MAX], scratch[DELIM_MAX];
+    int strip[MAX_HEREDOCS], nhd = 0, scratch_strip;
+    enum { PLAIN, SINGLE, DOUBLE } q = PLAIN;
+    const char *p;
+
+    s.n = s.len = s.open = s.skip = 0;
+    for (p = cmd; *p != '\0'; p++) {
+        char c = *p;
+
+        if (q == SINGLE) {
+            if (c == '\'')
+                q = PLAIN;
+            else
+                put(&s, c);
+            continue;
+        }
+        if (q == DOUBLE) {
+            if (c == '"') {
+                q = PLAIN;
+            } else if (c == '\\' && p[1] != '\0' &&
+                       strchr("\"\\$`\n", p[1]) != NULL) {
+                if (p[1] != '\n')
+                    put(&s, p[1]);
+                p++;
+            } else {
+                put(&s, c);
+            }
+            continue;
+        }
+        switch (c) {
+        case '\'':
+            q = SINGLE;
+            begin(&s);
+            break;
+        case '"':
+            q = DOUBLE;
+            begin(&s);
+            break;
+        case '\\':
+            if (p[1] == '\n')
+                p++;                    /* line continuation */
+            else if (p[1] != '\0')
+                put(&s, *++p);
+            break;
+        case ' ':
+        case '\t':
+        case '\r':
+            end_word(&s);
+            break;
+        case '#':
+            if (s.open) {
+                put(&s, c);
+                break;
+            }
+            while (p[1] != '\0' && p[1] != '\n')
+                p++;                    /* comment */
+            break;
+        case '<':
+            if (p[1] == '<' && p[2] != '<') {
+                end_word(&s);
+                if (nhd < MAX_HEREDOCS) {
+                    p = heredoc_start(p, delims[nhd], &strip[nhd]);
+                    if (delims[nhd][0] != '\0')
+                        nhd++;
+                } else {
+                    p = heredoc_start(p, scratch, &scratch_strip);
+                }
+                break;
+            }
+            /* fall through */
+        case '>':
+            end_word(&s);               /* <, >, >>, >|, >&, <&, <<<, <> */
+            while (p[1] == '<' || p[1] == '>' || p[1] == '&' || p[1] == '|')
+                p++;
+            s.skip = 1;
+            break;
+        case '&':
+            if (p[1] == '>') {          /* &>, &>> */
+                end_word(&s);
+                while (p[1] == '>')
+                    p++;
+                s.skip = 1;
+                break;
+            }
+            /* fall through */
+        case '\n':
+        case ';':
+        case '|':
+        case '(':
+        case ')':
+        case '`':
+            if (end_command(&s, m) != K_NONE)
+                return m->kind;
+            if (c == '\n' && nhd > 0) {
+                p = skip_heredocs(p, delims, strip, nhd);
+                nhd = 0;
+                if (p == NULL || *p == '\0')
+                    return K_NONE;
+            }
+            break;
+        default:
+            put(&s, c);
+        }
+    }
+    return end_command(&s, m);
+}
+
+/* ------------------------------------------------------------------------
+ * Measurement. `root` prefixes every path; it is "" in production and a
+ * fixture tree in the test driver.
+ */
+
+/* The file root+path into buf, NUL-terminated; its length, or -1. */
+static ssize_t slurp(const char *root, const char *path, char *buf,
+                     size_t size)
+{
+    char full[PATH_MAX];
+    ssize_t total = 0;
+    int fd;
+
+    if (snprintf(full, sizeof full, "%s%s", root, path) >= (int)sizeof full)
+        return -1;
+    fd = open(full, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    while ((size_t)total < size - 1) {
+        ssize_t r = read(fd, buf + total, size - 1 - (size_t)total);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            return -1;
+        }
+        if (r == 0)
+            break;
+        total += r;
+    }
+    close(fd);
+    buf[total] = '\0';
+    return total;
+}
+
+/* A decimal number at s (leading blanks allowed) into *out. */
+static int number(const char *s, unsigned long long *out)
+{
+    char *end;
+
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (!isdigit((unsigned char)*s))
+        return 0;
+    errno = 0;
+    *out = strtoull(s, &end, 10);
+    return errno == 0;
+}
+
+/* The kB figure of a /proc/meminfo key ("SwapFree:") at a line start. */
+static int meminfo(const char *buf, const char *key, unsigned long long *out)
+{
+    size_t n = strlen(key);
+    const char *p = buf;
+
+    while ((p = strstr(p, key)) != NULL) {
+        if (p == buf || p[-1] == '\n')
+            return number(p + n, out);
+        p += n;
+    }
+    return 0;
+}
+
+struct pressure {
+    double full;        /* memory PSI full avg10 in %, -1: unknown */
+    int swap;           /* all swap used in %, -1: unknown or no swap */
+};
+
+static void read_pressure(const char *root, struct pressure *pr)
+{
+    char buf[8192], *p, *end;
+    unsigned long long total, avail;
+
+    pr->full = -1;
+    pr->swap = -1;
+    if (slurp(root, "/proc/pressure/memory", buf, sizeof buf) > 0 &&
+        (p = strstr(buf, "full avg10=")) != NULL) {
+        double v = strtod(p + 11, &end);
+        if (end != p + 11 && v >= 0 && v <= 100)
+            pr->full = v;
+    }
+    if (slurp(root, "/proc/meminfo", buf, sizeof buf) > 0 &&
+        meminfo(buf, "SwapTotal:", &total) &&
+        meminfo(buf, "SwapFree:", &avail) && total > 0 && avail <= total)
+        pr->swap = (int)((total - avail) * 100 / total);
+}
+
+/* Data stored in all zram devices, % of their size; -1 if none. Info only. */
+static int zram_fill(const char *root)
+{
+    char path[PATH_MAX], buf[256];
+    unsigned long long size = 0, data = 0, s, d;
+    struct dirent *e;
+    DIR *dir;
+
+    if (snprintf(path, sizeof path, "%s/sys/block", root) >= (int)sizeof path)
+        return -1;
+    dir = opendir(path);
+    if (dir == NULL)
+        return -1;
+    while ((e = readdir(dir)) != NULL) {
+        if (strncmp(e->d_name, "zram", 4) != 0)
+            continue;
+        snprintf(path, sizeof path, "/sys/block/%s/disksize", e->d_name);
+        if (slurp(root, path, buf, sizeof buf) <= 0 || !number(buf, &s) ||
+            s == 0)
+            continue;           /* never initialised */
+        snprintf(path, sizeof path, "/sys/block/%s/mm_stat", e->d_name);
+        if (slurp(root, path, buf, sizeof buf) <= 0 || !number(buf, &d))
+            continue;
+        size += s;
+        data += d;
+    }
+    closedir(dir);
+    return size ? (int)(data * 100 / size) : -1;
+}
+
+/* ------------------------------------------------------------------------
+ * Heavy slots: one pass over /proc, processes under app-loadguard.slice.
+ */
+
+#define SHOWN 3                 /* holders named in a reason */
+#define MAX_DEPTH 64            /* ancestors followed */
+
+struct proc {
+    int pid, ppid;
+    enum kind kind;
+    char label[48];             /* "prove -lr t/" */
+};
+
+struct slots {
+    int busy;
+    int shown;
+    char holder[SHOWN][160];    /* "prove -lr t/ in ~/dev/sunriser" */
+};
+
+/* Bytes a reason must not carry: controls, and non-ASCII unless UTF-8. */
+static void sanitize(char *s)
+{
+    int utf8 = valid_utf8((const unsigned char *)s, strlen(s));
+
+    for (; *s != '\0'; s++)
+        if ((unsigned char)*s < 0x20 || *s == 0x7f ||
+            ((unsigned char)*s >= 0x80 && !utf8))
+            *s = '?';
+}
+
+static int read_ppid(const char *root, int pid, int *ppid)
+{
+    char path[64], buf[1024], *p;
+
+    snprintf(path, sizeof path, "/proc/%d/stat", pid);
+    if (slurp(root, path, buf, sizeof buf) <= 0)
+        return 0;
+    /* comm may hold spaces and parens: the fields follow the last ')'. */
+    p = strrchr(buf, ')');
+    return p != NULL && sscanf(p + 1, " %*c %d", ppid) == 1;
+}
+
+/* The kind of a running process by its argv; its short command in label. */
+static enum kind process_kind(const char *root, int pid, char *label,
+                              size_t size)
+{
+    char path[64], buf[4096], *av[MAX_WORDS];
+    struct match m;
+    ssize_t len;
+    int ac = 0, i;
+    char *p;
+
+    snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+    len = slurp(root, path, buf, sizeof buf);
+    if (len <= 0)
+        return K_NONE;          /* gone, a zombie, a kernel thread */
+    for (p = buf; p < buf + len && ac < MAX_WORDS; p += strlen(p) + 1)
+        av[ac++] = p;
+    while (ac > 1 && av[ac - 1][0] == '\0')
+        ac--;
+    /* A process title (npm: "npm test", padded with NULs) is one string. */
+    if (ac == 1 && strchr(av[0], ' ') != NULL) {
+        char *save, *w;
+        ac = 0;
+        for (w = strtok_r(av[0], " ", &save); w != NULL && ac < MAX_WORDS;
+             w = strtok_r(NULL, " ", &save))
+            av[ac++] = w;
+    }
+    if (classify(av, ac, &m) == K_NONE)
+        return K_NONE;
+    snprintf(label, size, "%s", base(av[m.at]));
+    for (i = m.at + 1; i < ac; i++) {
+        size_t used = strlen(label);
+        if (used + 1 + strlen(av[i]) >= size) {
+            if (used + 4 < size)
+                strcat(label, " ...");
+            break;
+        }
+        label[used] = ' ';
+        strcpy(label + used + 1, av[i]);
+    }
+    return m.kind;
+}
+
+static int by_pid(const void *a, const void *b)
+{
+    int x = ((const struct proc *)a)->pid, y = ((const struct proc *)b)->pid;
+    return (x > y) - (x < y);
+}
+
+static const struct proc *find(const struct proc *ps, size_t n, int pid)
+{
+    struct proc key;
+    key.pid = pid;
+    return bsearch(&key, ps, n, sizeof *ps, by_pid);
+}
+
+static int holds_slot(enum kind k)
+{
+    return k != K_NONE && k != K_CLAUDE;
+}
+
+/* Is a slot-holding process above p, within the slice? */
+static int heavy_above(const struct proc *ps, size_t n, const struct proc *p)
+{
+    int depth;
+
+    for (depth = 0; depth < MAX_DEPTH; depth++) {
+        p = find(ps, n, p->ppid);
+        if (p == NULL)
+            return 0;
+        if (holds_slot(p->kind))
+            return 1;
+    }
+    return 0;
+}
+
+/* "prove -lr t/ in ~/dev/sunriser" */
+static void describe(const char *root, const struct proc *p, char *out,
+                     size_t size)
+{
+    char path[PATH_MAX], cwd[PATH_MAX];
+    const char *home = getenv("HOME"), *where = cwd;
+    size_t hl = home ? strlen(home) : 0;
+    ssize_t n;
+
+    if (snprintf(path, sizeof path, "%s/proc/%d/cwd", root, p->pid) >=
+        (int)sizeof path ||
+        (n = readlink(path, cwd, sizeof cwd - 1)) <= 0) {
+        snprintf(out, size, "%s", p->label);
+    } else {
+        cwd[n] = '\0';
+        if (hl > 1 && strncmp(cwd, home, hl) == 0 &&
+            (cwd[hl] == '/' || cwd[hl] == '\0')) {
+            where = cwd + hl - 1;
+            cwd[hl - 1] = '~';
+        }
+        if (snprintf(out, size, "%s in %s", p->label, where) >= (int)size &&
+            size > 4)
+            strcpy(out + size - 4, "...");
+    }
+    sanitize(out);
+}
+
+static void scan_slots(const char *root, struct slots *sl)
+{
+    char path[PATH_MAX], buf[4096];
+    struct proc *ps = NULL;
+    size_t n = 0, cap = 0, i;
+    struct dirent *e;
+    DIR *dir;
+
+    sl->busy = sl->shown = 0;
+    if (snprintf(path, sizeof path, "%s/proc", root) >= (int)sizeof path)
+        return;
+    dir = opendir(path);
+    if (dir == NULL)
+        return;
+    while ((e = readdir(dir)) != NULL) {
+        char *end;
+        long pid = strtol(e->d_name, &end, 10);
+
+        if (!isdigit((unsigned char)e->d_name[0]) || *end != '\0' ||
+            pid <= 0 || pid > INT_MAX)
+            continue;
+        snprintf(path, sizeof path, "/proc/%ld/cgroup", pid);
+        if (slurp(root, path, buf, sizeof buf) <= 0 ||
+            strstr(buf, "/" SLICE "/") == NULL)
+            continue;
+        if (n == cap) {
+            struct proc *more = realloc(ps, (cap ? cap * 2 : 64) * sizeof *ps);
+            if (more == NULL)
+                break;
+            ps = more;
+            cap = cap ? cap * 2 : 64;
+        }
+        ps[n].pid = (int)pid;
+        if (!read_ppid(root, ps[n].pid, &ps[n].ppid))
+            continue;
+        ps[n].kind = process_kind(root, ps[n].pid, ps[n].label,
+                                  sizeof ps[n].label);
+        n++;
+    }
+    closedir(dir);
+    if (n > 0)
+        qsort(ps, n, sizeof *ps, by_pid);
+    for (i = 0; i < n; i++) {
+        if (!holds_slot(ps[i].kind) || heavy_above(ps, n, &ps[i]))
+            continue;
+        if (sl->shown < SHOWN)
+            describe(root, &ps[i], sl->holder[sl->shown++],
+                     sizeof sl->holder[0]);
+        sl->busy++;
+    }
+    free(ps);
+}
+
+/* ------------------------------------------------------------------------
+ * The decision.
+ */
+
+struct config {
+    int psi_full, swap_used, slots;
+};
+
+/* An integer from the environment (a trailing % allowed), else def. */
+static int env_int(const char *name, int def, int lo, int hi)
+{
+    const char *s = getenv(name);
+    long v = 0;
+
+    if (s == NULL || !isdigit((unsigned char)*s))
+        return def;
+    for (; isdigit((unsigned char)*s); s++)
+        if ((v = v * 10 + (*s - '0')) > hi)
+            return def;
+    if (*s == '%')
+        s++;
+    return *s == '\0' && v >= lo ? (int)v : def;
+}
+
+/* max(1, nproc / 2), nproc as `nproc` counts: the CPUs we may run on. */
+static int default_slots(void)
+{
+    cpu_set_t set;
+    long n = -1;
+
+    if (sched_getaffinity(0, sizeof set, &set) == 0)
+        n = CPU_COUNT(&set);
+    if (n < 1)
+        n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n >= 2 ? (int)(n / 2) : 1;
+}
+
+__attribute__((format(printf, 3, 4)))
+static void add(char *buf, size_t size, const char *fmt, ...)
+{
+    size_t len = strlen(buf);
+    va_list ap;
+
+    if (len + 1 >= size)
+        return;
+    va_start(ap, fmt);
+    vsnprintf(buf + len, size - len, fmt, ap);
+    va_end(ap);
+}
+
+static void measures(char *r, size_t size, const char *root,
+                     const struct pressure *pr, const struct config *c)
+{
+    int zram = zram_fill(root);
+
+    if (pr->full >= 0)
+        add(r, size, "memory pressure full=%.1f%% (limit %d%%)", pr->full,
+            c->psi_full);
+    else
+        add(r, size, "memory pressure n/a");
+    if (pr->swap >= 0)
+        add(r, size, ", swap %d%% used (limit %d%%)", pr->swap, c->swap_used);
+    if (zram >= 0)
+        add(r, size, ", zram %d%% full", zram);
+    add(r, size, ".\n");
+}
+
+static void advice(char *r, size_t size, const struct match *m, int slots)
+{
+    add(r, size, "%s; light commands (git status, ls, cat) still run.",
+        slots ? "Wait for one to finish, then retry"
+              : "Wait and retry later");
+    switch (m->kind) {
+    case K_PROVE:
+        add(r, size, " Or run fewer tests at once: `prove -l t/foo.t` "
+            "instead of `-r`.");
+        break;
+    case K_SUITE:
+        add(r, size, " Or run a single test file instead of the whole "
+            "suite.");
+        break;
+    case K_CLAUDE:
+        add(r, size, " Do not start new `claude -p`/`claude --bg` sessions "
+            "now; do the work in this one.");
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * The deny reason for a Bash command into reason; 0 if loadguard has no
+ * objection. Light commands return before any read.
+ */
+static int objection(const char *root, const char *command, char *reason,
+                     size_t size)
+{
+    const char *off = getenv("LOADGUARD_THROTTLE");
+    struct pressure pr;
+    struct config c;
+    struct slots sl;
+    struct match m;
+    int i;
+
+    if (off != NULL && strcmp(off, "0") == 0)
+        return 0;
+    if (heavy_command(command, &m) == K_NONE)
+        return 0;
+
+    c.psi_full = env_int("LOADGUARD_PSI_FULL", PSI_FULL_DEFAULT, 1, 100);
+    c.swap_used = env_int("LOADGUARD_SWAP_USED", SWAP_USED_DEFAULT, 1, 100);
+    read_pressure(root, &pr);
+    reason[0] = '\0';
+    if (pr.full >= c.psi_full || pr.swap >= c.swap_used) {
+        add(reason, size, "loadguard: heavy command refused (%s): ", m.label);
+        measures(reason, size, root, &pr, &c);
+        advice(reason, size, &m, 0);
+        return 1;
+    }
+
+    c.slots = env_int("LOADGUARD_HEAVY_SLOTS", default_slots(), 1, 4096);
+    scan_slots(root, &sl);
+    if (sl.busy < c.slots)
+        return 0;
+    add(reason, size, "loadguard: heavy command refused (%s): "
+        "%d/%d heavy slots busy (", m.label, sl.busy, c.slots);
+    for (i = 0; i < sl.shown; i++)
+        add(reason, size, "%s%s", i ? "; " : "", sl.holder[i]);
+    if (sl.busy > sl.shown)
+        add(reason, size, "; +%d more", sl.busy - sl.shown);
+    add(reason, size, "), ");
+    measures(reason, size, root, &pr, &c);
+    advice(reason, size, &m, 1);
+    return 1;
+}
+
+/*
+ * The longest reason is about 850 bytes (3 holders of < 160, all figures at
+ * 100 %, the longest advice): it never gets cut, and so never mid-character.
+ */
+#define REASON_MAX 1024
+
+/* The documented PreToolUse deny, on stdout; nothing if it cannot be built. */
+static void deny(const char *reason)
+{
+    cJSON *out = cJSON_CreateObject(), *hso = NULL;
+    char *text = NULL;
+
+    if (out != NULL &&
+        (hso = cJSON_AddObjectToObject(out, "hookSpecificOutput")) != NULL &&
+        cJSON_AddStringToObject(hso, "hookEventName", "PreToolUse") != NULL &&
+        cJSON_AddStringToObject(hso, "permissionDecision", "deny") != NULL &&
+        cJSON_AddStringToObject(hso, "permissionDecisionReason", reason) != NULL)
+        text = cJSON_PrintUnformatted(out);
+    if (text != NULL) {
+        /* No newline: the form recorded working in k7. */
+        fputs(text, stdout);
+        cJSON_free(text);
+    }
+    cJSON_Delete(out);
+}
+
+/* Decide on one payload: deny on stdout, or nothing. */
+static void hook(const char *root, const cJSON *payload)
+{
+    const cJSON *input = bash_tool_input(payload);
+    char reason[REASON_MAX];
+
+    if (input != NULL &&
+        objection(root,
+                  cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
+                  reason, sizeof reason))
+        deny(reason);
+}
+
 #ifndef LOADGUARD_TEST
 
 static void note(const char *why)
@@ -166,9 +1087,12 @@ static int blank(const char *s, size_t n)
 int main(void)
 {
     size_t len = 0;
-    char *buf = read_stdin(&len);
+    char *buf;
     cJSON *payload;
 
+    /* A closed stdout must not kill the hook: exit 0 all the same. */
+    signal(SIGPIPE, SIG_IGN);
+    buf = read_stdin(&len);
     if (buf == NULL) {
         note("stdin unreadable or too large");
         return 0;
@@ -183,8 +1107,7 @@ int main(void)
         note("payload is not UTF-8 JSON");
         return 0;
     }
-    bash_tool_input(payload);
-    /* No decision yet: stay silent. */
+    hook("", payload);
     cJSON_Delete(payload);
     return 0;
 }
@@ -192,9 +1115,15 @@ int main(void)
 #else /* LOADGUARD_TEST */
 
 /*
- * Test driver, payload on stdin:
- *   command    print tool_input.command verbatim
- * Exit 1 if the payload is not a Bash payload with a command, 64 on usage.
+ * Test driver, payload on stdin (a Bash payload unless noted):
+ *   command        print tool_input.command verbatim
+ *   heavy          print the label of the first heavy simple command, or
+ *                  nothing
+ *   measure ROOT   any payload: "full=%.2f swap=%d zram=%d" below ROOT
+ *   slots ROOT     any payload: busy count, then one holder per line
+ *   decide ROOT    exactly what the hook prints, with /proc and /sys below
+ *                  ROOT
+ * Exit 1 if a Bash payload is needed and missing, 64 on usage.
  */
 int main(int argc, char **argv)
 {
@@ -202,15 +1131,37 @@ int main(int argc, char **argv)
     char *buf = read_stdin(&len);
     cJSON *payload = buf ? parse_payload(buf, len) : NULL;
     const cJSON *input = bash_tool_input(payload);
-    int rc = 1;
+    const char *mode = argc >= 2 ? argv[1] : "";
+    const char *command = input ? cJSON_GetObjectItemCaseSensitive(
+        input, "command")->valuestring : NULL;
+    int rc = 0;
 
     free(buf);
-    if (input != NULL && argc == 2 && strcmp(argv[1], "command") == 0) {
-        fputs(cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
-              stdout);
-        rc = 0;
-    } else if (input != NULL) {
-        rc = 64;
+    if (argc == 2 && strcmp(mode, "command") == 0 && command) {
+        fputs(command, stdout);
+    } else if (argc == 2 && strcmp(mode, "heavy") == 0 && command) {
+        struct match m;
+        if (heavy_command(command, &m) != K_NONE)
+            fputs(m.label, stdout);
+    } else if (argc == 3 && strcmp(mode, "measure") == 0) {
+        struct pressure pr;
+        read_pressure(argv[2], &pr);
+        printf("full=%.2f swap=%d zram=%d", pr.full, pr.swap,
+               zram_fill(argv[2]));
+    } else if (argc == 3 && strcmp(mode, "slots") == 0) {
+        struct slots sl;
+        int i;
+        scan_slots(argv[2], &sl);
+        printf("%d\n", sl.busy);
+        for (i = 0; i < sl.shown; i++)
+            printf("%s\n", sl.holder[i]);
+    } else if (argc == 3 && strcmp(mode, "decide") == 0) {
+        hook(argv[2], payload);
+    } else if (argc == 2 && (strcmp(mode, "command") == 0 ||
+                             strcmp(mode, "heavy") == 0)) {
+        rc = 1;
+    } else {
+        rc = input != NULL ? 64 : 1;
     }
     cJSON_Delete(payload);
     return rc;

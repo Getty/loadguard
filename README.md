@@ -7,8 +7,12 @@ taking down the host they run on. Each Claude Code session runs inside its own
 systemd scope with memory and CPU limits, so one runaway command hits a wall
 inside that session instead of dragging the whole machine into swap.
 
-Linux only. Stage 1 of the design is built; the parts that refuse commands
-under pressure and tell the model why are not yet — see [Status](#status).
+When memory runs short, or too many heavy commands already run across all
+sessions, it refuses the next heavy one — a test suite, a build, a new
+headless `claude` — and tells the model why, with the numbers and a lighter
+alternative.
+
+Linux only. The CLI is not built yet — see [Status](#status).
 
 ## The problem this solves
 
@@ -69,6 +73,39 @@ So loadguard never rewrites a command. Permissions, working directory, exit
 codes, output and `run_in_background` behave exactly as without it; the limit
 costs nothing per command.
 
+### Refusing heavy commands
+
+Before every `Bash` call a small C hook looks at the command. Light commands —
+`git status`, `ls`, `cat`, anything not on the list below — pass at once,
+without the hook reading a single file. A **heavy** command is refused when
+
+- the host is under memory pressure: PSI memory `full avg10` at or above 10 %,
+  or all swap (zram and swapfile together) at least 90 % used; or
+- every **heavy slot** is taken: at least `max(1, nproc/2)` heavy commands
+  already run in confined sessions — any session, not just this one.
+
+Heavy means the command runs `prove`, `make … test`, `dzil test|build|release`,
+`cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
+`perlbench`, or starts `claude -p`/`--print`/`--bg`. It is recognised in
+command position — `cd x && FOO=1 nice prove -lr t/` is heavy,
+`git log --grep=prove` or a heredoc that mentions `make test` is not. A
+running command holds one slot however many processes it spawns; a nested
+`claude -p` holds none, but what it runs does.
+
+The refusal is the reason Claude Code hands to the model:
+
+```
+loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0% (limit 10%), swap 60% used (limit 90%), zram 97% full.
+Wait for one to finish, then retry; light commands (git status, ls, cat) still run. Or run a single test file instead of the whole suite.
+```
+
+The thresholds come from the 54 snapshots above: memory `full avg10` never
+exceeded 2.03 % in the calm ones and never fell below 45.47 % in the thrashing
+ones; swap stayed at or below 68 % calm and reached 92–100 % thrashing. The
+hook costs about 0.5 ms for a light command and under 5 ms for a heavy one on
+that 4-core machine. Under memory pressure it does not look at other
+processes at all — reading them can itself stall on swap.
+
 Things loadguard leaves alone on purpose:
 
 - A session that is already in a `loadguard-*.scope` — a resumed or compacted
@@ -84,18 +121,16 @@ Built:
 
 - **Session confinement** (above), with limits from environment variables.
 - **The `PreToolUse` hook on `Bash`**, a small C binary compiled on the first
-  `SessionStart`. It currently lets every command through unchanged; it is
-  in place so the next stages add decisions, not plumbing. Until the binary
-  exists (still building, no compiler, build failed) the hook exits 0.
+  `SessionStart`. It refuses heavy commands under memory pressure or with
+  every heavy slot busy (above) and lets everything else through unchanged.
+  Until the binary exists (still building, no compiler, build failed) the
+  hook exits 0 and nothing is refused.
 
 Not built yet:
 
-- **A global limit on heavy commands** across all sessions (`prove`,
-  `make test`, `cargo build`, container builds, `claude -p`, …).
-- **Refusing heavy commands under memory pressure**, with a short reason the
-  model can act on: the pressure figures, what holds the slots, and a lighter
-  alternative. Light commands (`git status`, `ls`, `cat`) are never refused.
 - **A CLI**: `loadguard status`, `doctor`, `explain '<cmd>'`.
+- **Learning heavy commands** from what actually used a lot of memory in a
+  session, beyond the fixed list.
 
 The design, with the measurements behind each decision, is in
 [`docs/design.md`](docs/design.md) (German).
@@ -120,17 +155,22 @@ plugin does nothing.
 
 ## Configuration
 
-Environment variables, read when a session starts. Memory values are percent
-of `MemTotal`; a trailing `%` is accepted. An invalid or out-of-range value
-falls back to the default.
+Environment variables, from the environment `claude` was started with. The
+confinement ones are read when a session starts, the refusal ones on every
+`Bash` call. Values are integers; a trailing `%` is accepted. An invalid or
+out-of-range value falls back to the default.
 
 | Variable | Default | Sets |
 |---|---|---|
-| `LOADGUARD_MEMORY_HIGH` | `30` | `MemoryHigh` — above this the session is throttled |
-| `LOADGUARD_MEMORY_MAX` | `40` | `MemoryMax` — above this the kernel kills inside the scope |
-| `LOADGUARD_MEMORY_SWAP_MAX` | `10` | `MemorySwapMax` (`0` allowed) |
+| `LOADGUARD_MEMORY_HIGH` | `30` | `MemoryHigh`, % of `MemTotal` — above this the session is throttled |
+| `LOADGUARD_MEMORY_MAX` | `40` | `MemoryMax`, % of `MemTotal` — above this the kernel kills inside the scope |
+| `LOADGUARD_MEMORY_SWAP_MAX` | `10` | `MemorySwapMax`, % of `MemTotal` (`0` allowed) |
 | `LOADGUARD_CPU_WEIGHT` | `50` | `CPUWeight`, 1–10000 (systemd default: 100) |
 | `LOADGUARD_CONFINE` | — | `0` turns confinement off |
+| `LOADGUARD_PSI_FULL` | `10` | refuse heavy commands at this memory PSI `full avg10`, 1–100 % |
+| `LOADGUARD_SWAP_USED` | `90` | … or at this much of all swap used, 1–100 % |
+| `LOADGUARD_HEAVY_SLOTS` | `nproc/2`, at least 1 | heavy commands allowed at once across all confined sessions |
+| `LOADGUARD_THROTTLE` | — | `0` turns refusing off |
 
 The limit is per session, and `claude` itself (about 300 MB) counts against
 it. To see where a session landed:
@@ -156,10 +196,11 @@ Or from inside Claude Code: `/plugin marketplace add Getty/marketplace`, then
 - **Confinement only:** start `claude` with `LOADGUARD_CONFINE=0` in its
   environment. Only the exact value `0` switches it off; anything else keeps
   the default.
+- **Refusing only:** start `claude` with `LOADGUARD_THROTTLE=0`, same rule.
 - **The whole plugin:** `claude plugin disable loadguard@getty`, or
   `claude plugin uninstall loadguard@getty`.
 
-Either takes effect for new sessions. A session that is already confined stays
+Each takes effect for new sessions. A session that is already confined stays
 in its scope until it ends.
 
 ## Codex

@@ -1,0 +1,196 @@
+{
+ "comment": "Two confined sessions doing light work, plus heavy processes outside app-loadguard.slice. Busy: 0.",
+ "processes": [
+  {
+   "pid": 4100,
+   "ppid": 4000,
+   "comm": "claude",
+   "argv": [
+    "/home/getty/.local/bin/claude",
+    "--dangerously-skip-permissions"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4110,
+   "ppid": 4100,
+   "comm": "npm exec @upsta",
+   "argv": [
+    "npm exec @upstash/context7-mcp@latest",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4111,
+   "ppid": 4110,
+   "comm": "sh",
+   "argv": [
+    "sh",
+    "-c",
+    "'context7-mcp'"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4112,
+   "ppid": 4111,
+   "comm": "MainThread",
+   "argv": [
+    "node",
+    "/home/getty/.npm/_npx/c35ab75beed40a3c/node_modules/.bin/context7-mcp"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4120,
+   "ppid": 4100,
+   "comm": "python3",
+   "argv": [
+    "python3",
+    "/home/getty/.claude/dev-marketplace/agent-irc/bin/agent-irc"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4130,
+   "ppid": 4100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'git status' && pwd -P >| /tmp/claude-4a1c-cwd"
+   ]
+  },
+  {
+   "pid": 4131,
+   "ppid": 4130,
+   "comm": "git",
+   "argv": [
+    "git",
+    "status"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 5100,
+   "ppid": 5000,
+   "comm": "claude",
+   "argv": [
+    "/home/getty/.local/bin/claude"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5110,
+   "ppid": 5100,
+   "comm": "npm exec serper",
+   "argv": [
+    "npm exec serper-search-scrape-mcp-server@latest",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5130,
+   "ppid": 5100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'make' && pwd -P >| /tmp/claude-5b2d-cwd"
+   ]
+  },
+  {
+   "pid": 5131,
+   "ppid": 5130,
+   "comm": "make",
+   "argv": [
+    "make"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5132,
+   "ppid": 5131,
+   "comm": "cc",
+   "argv": [
+    "cc",
+    "-c",
+    "-O2",
+    "Foo.c"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 2,
+   "ppid": 0,
+   "comm": "kthreadd",
+   "argv": [],
+   "cgroup": "0::/",
+   "cwd": "/"
+  },
+  {
+   "pid": 6100,
+   "ppid": 6000,
+   "comm": "bash",
+   "argv": [
+    "-bash"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/session-3.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 6101,
+   "ppid": 6100,
+   "comm": "prove",
+   "argv": [
+    "/usr/bin/perl",
+    "/usr/bin/prove",
+    "-lr",
+    "t/"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/session-3.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 6200,
+   "ppid": 1,
+   "comm": "make",
+   "argv": [
+    "make",
+    "test"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-0c1d.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  }
+ ]
+}

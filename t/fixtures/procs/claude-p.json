@@ -1,0 +1,53 @@
+{
+ "comment": "Session A (idle-sessions) started a nested `claude -p` and a `claude --bg`; both stay in A's scope and are idle. Busy: 0.",
+ "processes": [
+  {
+   "pid": 4300,
+   "ppid": 4100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'claude -p '\"'\"'run the test suite and fix failures'\"'\"'' && pwd -P >| /tmp/claude-4c8a-cwd"
+   ]
+  },
+  {
+   "pid": 4301,
+   "ppid": 4300,
+   "comm": "claude",
+   "argv": [
+    "claude",
+    "-p",
+    "run the test suite and fix failures"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4400,
+   "ppid": 4100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'claude --bg '\"'\"'refactor the parser'\"'\"'' && pwd -P >| /tmp/claude-4d9b-cwd"
+   ]
+  },
+  {
+   "pid": 4401,
+   "ppid": 4400,
+   "comm": "claude",
+   "argv": [
+    "claude",
+    "--bg",
+    "refactor the parser"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  }
+ ]
+}

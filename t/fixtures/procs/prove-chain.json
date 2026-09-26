@@ -1,0 +1,53 @@
+{
+ "comment": "Session A (idle-sessions) runs `prove -lr t/`: wrapper, prove under perl, two test children. Busy: 1.",
+ "processes": [
+  {
+   "pid": 4200,
+   "ppid": 4100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd ~/dev/sunriser && prove -lr t/' && pwd -P >| /tmp/claude-4b7e-cwd"
+   ]
+  },
+  {
+   "pid": 4201,
+   "ppid": 4200,
+   "comm": "prove",
+   "argv": [
+    "/usr/bin/perl",
+    "/usr/bin/prove",
+    "-lr",
+    "t/"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4202,
+   "ppid": 4201,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "t/01-basic.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  },
+  {
+   "pid": 4203,
+   "ppid": 4201,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "-w",
+    "t/api/02-routes.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-1f0e2d3c-4100.scope",
+   "cwd": "/home/getty/dev/sunriser"
+  }
+ ]
+}

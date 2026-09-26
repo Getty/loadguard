@@ -68,3 +68,29 @@ recorded; `Swap:` is the sum of all swap devices (on reuben, per `/proc/swaps` a
 |---|---|
 | `reuben-recorded-20260926/` | **Recorded** verbatim from reuben on 2026-09-26 01:48 (`proc/loadavg`, `proc/meminfo`, `proc/pressure/*`, `sys/block/zram0/{disksize,mm_stat}`), memory calm, cpu some ~86 % |
 | `thrash-20260917-175030-reconstructed/` | **Reconstructed** from `incidents/20260917-175030.txt`: loadavg and PSI lines copied, `meminfo` holds only the four keys, rebuilt from `free -m` (MiB × 1024 kB). No zram (not in the snapshot). |
+
+## `procs/` — running processes, as JSON specs
+
+**Reconstructed by hand** (k4) for the slot scan; `t/test_throttle.py` turns each
+spec into `/proc/<pid>/{stat,cmdline,cgroup,cwd}` on top of a `proc/` tree. JSON,
+not raw `/proc` files, so a diff shows the argv. Shapes follow what reuben showed
+live on 2026-09-26 (read-only): Claude Code's wrapper
+`/bin/bash -c 'source <snapshot> … && eval '<cmd>' && pwd -P >| /tmp/claude-XXXX-cwd'`,
+`claude` in `app-loadguard.slice/loadguard-<session8>-<pid>.scope`, MCP servers as
+`npm exec …` whose cmdline is a process title padded with NULs (npm sets
+`process.title` to `npm` + its positional args, `lib/npm.js`), `comm` with spaces.
+prove runs as `/usr/bin/perl /usr/bin/prove …` (`#!/usr/bin/perl`), its test
+children as `/usr/bin/perl t/….t` (TAP::Harness passes `-l` via `PERL5LIB`); the
+MakeMaker `make test` chain follows its generated Makefile. No heavy command was run
+to record these.
+
+| Spec | Scenario | Heavy slots |
+|---|---|---|
+| `idle-sessions.json` | sessions A (pid 4100) and B (5100) with MCP servers, a `git status` and a plain `make`; outside the slice a tmux `prove` and a terminal `make test`; a kernel thread | 0 |
+| `prove-chain.json` | A runs `prove -lr t/`: wrapper, prove, two perl test children | 1 |
+| `make-recursion.json` | B runs `make test`, recursing into `xs/` (`sh -c` → `make test`) plus the harness | 1 |
+| `claude-p.json` | A started a nested `claude -p` and a `claude --bg`, both idle, same scope | 0 |
+| `claude-p-prove.json` | the `claude -p` above runs `prove -l t/foo.t` (needs `claude-p`) | 1 |
+| `npm-title.json` | B runs `npm test` (title `npm test`), which runs `sh -c 'prove -lr t'` | 1 |
+
+PIDs are disjoint across specs, so tests combine them (all six: 4 slots).

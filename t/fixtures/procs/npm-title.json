@@ -1,0 +1,60 @@
+{
+ "comment": "Session B (idle-sessions) runs `npm test`; npm rewrites its cmdline to the title \"npm test\" padded with NULs. Busy: 1.",
+ "processes": [
+  {
+   "pid": 5300,
+   "ppid": 5100,
+   "comm": "bash",
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790396159681-qa2228.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'npm test' && pwd -P >| /tmp/claude-5d4a-cwd"
+   ]
+  },
+  {
+   "pid": 5301,
+   "ppid": 5300,
+   "comm": "npm test",
+   "argv": [
+    "npm test",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5302,
+   "ppid": 5301,
+   "comm": "sh",
+   "argv": [
+    "sh",
+    "-c",
+    "prove -lr t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  },
+  {
+   "pid": 5303,
+   "ppid": 5302,
+   "comm": "prove",
+   "argv": [
+    "/usr/bin/perl",
+    "/usr/bin/prove",
+    "-lr",
+    "t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-9a8b7c6d-5100.scope",
+   "cwd": "/home/getty/dev/p5-foo"
+  }
+ ]
+}
