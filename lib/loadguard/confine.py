@@ -277,6 +277,24 @@ def wait_attached(root, pid, name):
         time.sleep(0.01)
 
 
+def disabled(environ):
+    """LOADGUARD_CONFINE=0 turns stage 1 off; only that exact value."""
+    return environ.get("LOADGUARD_CONFINE") == "0"
+
+
+def user_bus(environ):
+    """$XDG_RUNTIME_DIR if the user bus socket is in it, else None."""
+    runtime_dir = environ.get("XDG_RUNTIME_DIR", "")
+    if runtime_dir.startswith("/") and \
+            os.path.exists(os.path.join(runtime_dir, "bus")):
+        return runtime_dir
+    return None
+
+
+def find_busctl(environ):
+    return shutil.which("busctl", path=environ.get("PATH", ""))
+
+
 def confine(session_id, start=None, root="", environ=None, uid=None,
             me=None):
     """Attach the session's claude process to its scope. Returns a status word.
@@ -288,7 +306,7 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
     uid = os.getuid() if uid is None else uid
     start = os.getppid() if start is None else start
     me = os.getpid() if me is None else me
-    if environ.get("LOADGUARD_CONFINE") == "0":
+    if disabled(environ):
         return "disabled"
 
     pid, chain = find_claude(root, start)
@@ -301,11 +319,10 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
         return "already"
     if not lingering(root, uid):
         return "no-linger"
-    runtime_dir = environ.get("XDG_RUNTIME_DIR", "")
-    if not runtime_dir.startswith("/") or \
-            not os.path.exists(os.path.join(runtime_dir, "bus")):
+    runtime_dir = user_bus(environ)
+    if runtime_dir is None:
         return "no-bus"
-    busctl = shutil.which("busctl", path=environ.get("PATH", ""))
+    busctl = find_busctl(environ)
     if busctl is None:
         return "no-busctl"
     if not delegated(root, runtime_dir, uid):

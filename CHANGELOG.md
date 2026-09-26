@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- New CLI `bin/loadguard` (k5), on the Bash tool's `PATH` while the plugin
+  is enabled, so the model can run it too: `loadguard status` (memory PSI
+  full/some, swap, zram, the limits in effect, heavy slots busy and who holds
+  them, whether this session is confined), `loadguard explain '<cmd>'` (what
+  the hook would do with this Bash command now, with the exact reason the
+  model would see; nothing runs) and `loadguard doctor` (cgroup v2, memory
+  delegation, linger, user bus and `busctl`, hook binary present and built
+  from these sources, compiler, both stages on or off, environment values
+  that change nothing; exit 1 if something that should work does not). The
+  decision still exists only in the C hook: the binary got two read-only
+  report modes, `--report` and `--explain`, that print one line of JSON from
+  the same functions the hook runs, and the CLI only formats it — a test
+  checks that `explain` gives the hook's verdict and reason byte for byte.
+  Hook mode (any other call) is unchanged: 0.605 ms median for a light
+  command, 4.0 ms for a heavy one on reuben, as before. Under memory pressure
+  `status` does not scan processes, like the hook. Without a hook binary
+  `status` and `explain` say the hook is passing everything through. The
+  CLI finds the binary through `$CLAUDE_PLUGIN_DATA`, else the data
+  directory of the installed copy it belongs to, else a checkout's `build/`.
+  43 new tests.
 - The PreToolUse hook now refuses heavy commands, with a reason for the model
   (k4). Heavy: `prove`, `make … test`, `dzil test|build|release`, `cpanm`,
   `docker|podman build|run`, `cargo build|test`, `npm test`, `perlbench`,

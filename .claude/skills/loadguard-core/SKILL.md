@@ -111,12 +111,24 @@ heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTT
   only the topmost heavy process of a chain in the slice. `claude -p`/`--bg`
   are heavy to start but hold no slot.
 
+## CLI (k5)
+
+`bin/loadguard status|doctor|explain` (`lib/loadguard/cli.py`) only formats the
+JSON of the binary's read-only report modes: `loadguard-hook --report` (reads no
+stdin) and `--explain` (payload on stdin). Both run `objection()`/`no_room()`;
+the CLI never classifies, scans or compares a figure — a second decision path
+would drift (`test_explain_is_the_hook`). Every other call is hook mode (the
+starter passes no arguments): keep it unchanged in behavior and cost. `bin/` is
+on the Bash tool's PATH, `CLAUDE_PLUGIN_DATA` is not in its env: the CLI derives
+the data dir from its own install path.
+
 ## Testing
 
 Unit-test the decision function on recorded snapshots: turn files from
 `~/load-incidents/` into fixtures (PSI + meminfo + command → expected decision).
 The test driver (`-DLOADGUARD_TEST`) runs the real decision against a fixture
-root (`decide ROOT`, `slots ROOT`, `measure ROOT`, `heavy`); running processes are
-JSON specs in `t/fixtures/procs/`. The production binary has no root override.
+root (`decide ROOT`, `slots ROOT`, `measure ROOT`, `report ROOT`, `explain ROOT`,
+`heavy`); running processes are JSON specs in `t/fixtures/procs/`. The
+production binary has no root override.
 Never generate real memory pressure on reuben to test — it is the machine this
 plugin protects, and it has 8 GB.

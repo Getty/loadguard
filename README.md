@@ -12,7 +12,7 @@ sessions, it refuses the next heavy one — a test suite, a build, a new
 headless `claude` — and tells the model why, with the numbers and a lighter
 alternative.
 
-Linux only. The CLI is not built yet — see [Status](#status).
+Linux only.
 
 ## The problem this solves
 
@@ -125,10 +125,10 @@ Built:
   every heavy slot busy (above) and lets everything else through unchanged.
   Until the binary exists (still building, no compiler, build failed) the
   hook exits 0 and nothing is refused.
+- **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`.
 
 Not built yet:
 
-- **A CLI**: `loadguard status`, `doctor`, `explain '<cmd>'`.
 - **Learning heavy commands** from what actually used a lot of memory in a
   session, beyond the fixed list.
 
@@ -178,6 +178,48 @@ it. To see where a session landed:
 ```sh
 systemctl --user list-units 'loadguard-*'
 ```
+
+## CLI
+
+The plugin's `bin/` is on the `PATH` of Claude Code's Bash tool while the
+plugin is enabled, so the model can ask loadguard itself — and so can you,
+from a session or with the full path
+(`~/.claude/plugins/cache/<marketplace>/loadguard/<version>/bin/loadguard`).
+
+| Command | Answers |
+|---|---|
+| `loadguard status` | memory pressure, swap, zram, the limits in effect, heavy slots busy and who holds them, whether this session is confined |
+| `loadguard explain '<command>'` | what the hook would do with this Bash command right now — a dry run, nothing is executed |
+| `loadguard doctor` | whether loadguard can work on this host; exits 1 if something that should work does not |
+
+```
+$ loadguard status
+memory:  PSI full 0.00% (limit 10%), some 0.31%; swap 60% used (limit 90%); zram 97% full
+slots:   1/2 heavy busy
+         prove -lr t/ in ~/dev/sunriser
+heavy:   a heavy command would run now
+session: confined in loadguard-7085681a-2882634.scope
+hook:    /home/you/.claude/plugins/data/loadguard-getty/bin/loadguard-hook (installed as loadguard@getty)
+
+$ loadguard explain 'dzil test'
+heavy:   yes (dzil test)
+memory:  PSI full 0.00% (limit 10%), some 0.31%; swap 60% used (limit 90%); zram 97% full
+slots:   2/2 heavy busy
+         prove -lr t/ in ~/dev/sunriser
+         make test in ~/dev/p5-foo
+verdict: deny; the model is told:
+         loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0% (limit 10%), swap 60% used (limit 90%), zram 97% full.
+         Wait for one to finish, then retry; light commands (git status, ls, cat) still run. Or run a single test file instead of the whole suite.
+```
+
+The answers come from the hook binary itself, through two read-only report
+modes, so the CLI and the hook cannot disagree. The limits are read from the
+CLI's own environment — the session's, when the model runs it. Under memory
+pressure `status` does not look at running processes, just as the hook does
+not: reading them can stall on swap. Without a hook binary (not built yet, no
+compiler) `status` and `explain` say that the hook is passing everything
+through; `doctor` says how to build it. The CLI itself never builds or
+refuses anything.
 
 ## Install
 

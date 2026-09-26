@@ -85,6 +85,12 @@ def compile_hook(root, cc, out, flags=FLAGS, defines=(), timeout=TIMEOUT_S):
             os.unlink(tmp)
 
 
+def current(root, data_dir, cc):
+    """Is data_dir/bin/loadguard-hook built from root's sources with cc?"""
+    out = os.path.join(data_dir, "bin", BINARY)
+    return _current(out, out + ".stamp", stamp(root, cc))
+
+
 def _current(out, stamp_file, key):
     try:
         with open(stamp_file, encoding="ascii") as f:

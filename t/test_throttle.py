@@ -663,6 +663,172 @@ class Decide(Tree):
                 self.assertEqual((proc.returncode, proc.stdout), (0, b""))
 
 
+# --- the report modes for bin/loadguard (k5) ---------------------------------
+
+def default_slots():
+    return max(1, len(os.sched_getaffinity(0)) // 2)
+
+
+class Report(Tree):
+    """`report ROOT` / `explain ROOT` print what --report / --explain print."""
+
+    def report(self, root, mode="report", stdin=b"{}", **env):
+        proc = self.driver(mode, root, stdin, **env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, b"")
+        out = proc.stdout.decode("utf-8")
+        self.assertEqual(out.count("\n"), 1, out)     # one line
+        self.assertTrue(out.endswith("}\n"), out)
+        return json.loads(out)
+
+    def explain(self, root, command, **env):
+        return self.report(root, "explain", payload(command), **env)
+
+    def test_status_calm(self):
+        root = self.tree(CALM, ["idle-sessions"])
+        self.assertEqual(self.report(root, LOADGUARD_HEAVY_SLOTS="2"), {
+            "report": 1, "mode": "status", "throttle": True, "ignored": [],
+            "limits": {"psi_full": 10, "swap_used": 90, "slots": 2},
+            "pressure": {"full": 0, "some": 0.31, "swap": 60, "zram": 97},
+            "pressured": False, "slots": {"busy": 0, "holders": []},
+            "refuse_heavy": False})
+
+    def test_status_under_pressure_scans_nothing(self):
+        # As in the hook: a FIFO as cmdline would block any reader.
+        root = self.tree(THRASH, ["idle-sessions", "prove-chain"])
+        os.unlink(os.path.join(root, "proc", "4201", "cmdline"))
+        os.mkfifo(os.path.join(root, "proc", "4201", "cmdline"))
+        start = time.monotonic()
+        doc = self.report(root)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(doc["pressure"], {"full": 59.94, "some": 63.49,
+                                           "swap": 100, "zram": None})
+        self.assertEqual(doc["limits"]["slots"], default_slots())
+        self.assertEqual((doc["pressured"], doc["slots"], doc["refuse_heavy"]),
+                         (True, None, True))
+
+    def test_status_slots_full(self):
+        root = self.tree(CALM, ["idle-sessions", "prove-chain",
+                                "make-recursion", "claude-p",
+                                "claude-p-prove", "npm-title"])
+        doc = self.report(root, LOADGUARD_HEAVY_SLOTS="4")
+        self.assertEqual(doc["slots"], {"busy": 4, "holders": [
+            "prove -lr t/ in ~/dev/sunriser",
+            "prove -l t/foo.t in ~/dev/sunriser",
+            "make test in ~/dev/p5-foo"]})
+        self.assertEqual((doc["pressured"], doc["refuse_heavy"]),
+                         (False, True))
+        self.assertFalse(self.report(root, LOADGUARD_HEAVY_SLOTS="5")
+                         ["refuse_heavy"])
+
+    def test_status_throttle_off_still_measures(self):
+        doc = self.report(self.tree(THRASH), LOADGUARD_THROTTLE="0")
+        self.assertEqual((doc["throttle"], doc["pressured"],
+                          doc["refuse_heavy"], doc["ignored"]),
+                         (False, True, False, []))
+
+    def test_ignored_variables(self):
+        root = self.tree(CALM)
+        doc = self.report(root, LOADGUARD_THROTTLE="off",
+                          LOADGUARD_PSI_FULL="5.5", LOADGUARD_SWAP_USED="",
+                          LOADGUARD_HEAVY_SLOTS="0")
+        self.assertEqual(doc["ignored"], [
+            "LOADGUARD_THROTTLE", "LOADGUARD_PSI_FULL", "LOADGUARD_SWAP_USED",
+            "LOADGUARD_HEAVY_SLOTS"])
+        self.assertEqual(doc["limits"], {"psi_full": 10, "swap_used": 90,
+                                         "slots": default_slots()})
+        doc = self.report(root, LOADGUARD_PSI_FULL="20%",
+                          LOADGUARD_HEAVY_SLOTS="4096")
+        self.assertEqual((doc["ignored"], doc["limits"]["psi_full"],
+                          doc["limits"]["slots"]), ([], 20, 4096))
+        self.assertEqual(self.explain(root, "ls", LOADGUARD_SWAP_USED="x")
+                         ["ignored"], ["LOADGUARD_SWAP_USED"])
+
+    def test_explain_light_reads_nothing(self):
+        root = self.tree(CALM)
+        for rel in ("proc/pressure/memory", "proc/meminfo"):
+            os.unlink(os.path.join(root, rel))
+            os.mkfifo(os.path.join(root, rel))
+        self.assertEqual(self.explain(root, "cat prove.txt"), {
+            "report": 1, "mode": "explain", "throttle": True, "ignored": [],
+            "bash": True, "heavy": None, "decision": "allow",
+            "reason": None})
+
+    def test_explain_heavy_allowed(self):
+        root = self.tree(CALM, ["idle-sessions", "prove-chain"])
+        doc = self.explain(root, "cd x && make test",
+                           LOADGUARD_HEAVY_SLOTS="2")
+        self.assertEqual(doc["heavy"], "make test")
+        self.assertEqual(doc["limits"], {"psi_full": 10, "swap_used": 90,
+                                         "slots": 2})
+        self.assertEqual(doc["slots"], {
+            "busy": 1, "holders": ["prove -lr t/ in ~/dev/sunriser"]})
+        self.assertEqual((doc["pressured"], doc["decision"], doc["reason"]),
+                         (False, "allow", None))
+
+    def test_explain_under_pressure(self):
+        doc = self.explain(self.tree(THRASH), "prove -lr t/")
+        self.assertEqual(doc["limits"], {"psi_full": 10, "swap_used": 90})
+        self.assertEqual((doc["pressured"], doc["slots"], doc["decision"]),
+                         (True, None, "deny"))
+
+    def test_explain_throttle_off(self):
+        doc = self.explain(self.tree(THRASH), "prove", LOADGUARD_THROTTLE="0")
+        self.assertEqual(doc, {
+            "report": 1, "mode": "explain", "throttle": False, "ignored": [],
+            "bash": True, "heavy": None, "decision": "allow",
+            "reason": None})
+
+    def test_explain_not_a_bash_payload(self):
+        root = self.tree(THRASH)
+        # A lone surrogate is what a non-UTF-8 command turns into in JSON.
+        surrogate = (b'{"tool_name": "Bash", '
+                     b'"tool_input": {"command": "prove \\udcff"}}')
+        for stdin in (b"{}", b"", b"nul", surrogate, json.dumps(
+                {"tool_name": "Read", "tool_input": {"command": "prove"}}
+        ).encode()):
+            with self.subTest(stdin=stdin):
+                self.assertEqual(self.report(root, "explain", stdin), {
+                    "report": 1, "mode": "explain", "throttle": True,
+                    "ignored": [], "bash": False, "decision": "allow",
+                    "reason": None})
+
+    def test_explain_is_the_hook(self):
+        # The decision logic exists once: for every root, environment and
+        # command, --explain gives the verdict and the reason the hook
+        # prints — byte for byte.
+        roots = {
+            "calm": self.tree(CALM, ["idle-sessions"]),
+            "thrash": self.tree(THRASH, ["idle-sessions", "prove-chain"]),
+            "busy": self.tree(CALM, ["idle-sessions", "prove-chain",
+                                     "make-recursion", "claude-p",
+                                     "claude-p-prove", "npm-title"]),
+            "nothing": self.tree(),
+        }
+        envs = ({}, {"LOADGUARD_HEAVY_SLOTS": "1"},
+                {"LOADGUARD_HEAVY_SLOTS": "4"}, {"LOADGUARD_THROTTLE": "0"},
+                {"LOADGUARD_PSI_FULL": "1", "LOADGUARD_SWAP_USED": "50%"})
+        commands = ("prove -lr t/", "cd x && FOO=1 nice make test",
+                    "claude -p 'go'", "podman build .", "cpanm Foo",
+                    "git status", "cat prove.txt", "echo 'a; prove'")
+        seen = set()
+        for name, root in roots.items():
+            for env in envs:
+                for command in commands:
+                    with self.subTest(root=name, env=env, command=command):
+                        out = self.decide(root, command, **env)
+                        doc = self.explain(root, command, **env)
+                        reason = json.loads(out)["hookSpecificOutput"][
+                            "permissionDecisionReason"] if out else None
+                        self.assertEqual(
+                            (doc["decision"], doc["reason"]),
+                            ("deny" if out else "allow", reason))
+                        seen.add(doc["decision"] if reason is None else
+                                 "slots" if "slots busy" in reason else
+                                 "pressure")
+        self.assertEqual(seen, {"allow", "slots", "pressure"})
+
+
 # --- calibration against the incident snapshots ---------------------------
 
 def incident_files():
@@ -753,6 +919,48 @@ class LiveHost(unittest.TestCase):
         proc = run([BIN["hook"]], payload("git status"))
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
                          (0, b"", b""))
+
+    def test_report_modes(self):
+        # --report reads no stdin: a pipe that stays open must not block it.
+        r, w = os.pipe()
+        try:
+            times = []
+            for _ in range(20):
+                start = time.perf_counter()
+                proc = subprocess.run([BIN["hook"], "--report"], stdin=r,
+                                      capture_output=True, timeout=10,
+                                      env=base_env())
+                times.append((time.perf_counter() - start) * 1000)
+                self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        finally:
+            os.close(r)
+            os.close(w)
+        doc = json.loads(proc.stdout)
+        self.assertEqual((doc["report"], doc["mode"]), (1, "status"))
+        self.assertEqual(set(doc), {
+            "report", "mode", "throttle", "ignored", "limits", "pressure",
+            "pressured", "slots", "refuse_heavy"})
+        sys.stderr.write("[--report n=20: median %.2f ms] "
+                         % statistics.median(times))
+        proc = run([BIN["hook"], "--explain"], payload("git status"))
+        self.assertEqual(json.loads(proc.stdout)["heavy"], None)
+        proc = run([BIN["hook"], "--explain"], payload("prove -lr t/"))
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["heavy"], "prove")
+        self.assertIn(doc["decision"], ("allow", "deny"))
+
+    def test_other_arguments_are_the_hook(self):
+        # Only exactly `--report` or `--explain` switch modes; any other
+        # call is the hook as before.
+        for argv in (["--bogus"], ["--report", "x"], ["--explain", "x"],
+                     ["-report"], ["--REPORT"]):
+            with self.subTest(argv=argv):
+                proc = run([BIN["hook"]] + argv, payload("git status"))
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                                 (0, b"", b""))
+                proc = run([BIN["hook"]] + argv, b"{")
+                self.assertEqual((proc.returncode, proc.stdout), (0, b""))
+                self.assertIn(b"pass-through", proc.stderr)
 
 
 if __name__ == "__main__":

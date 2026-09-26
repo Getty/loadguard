@@ -233,7 +233,8 @@ sonst kann die KI nicht einmal nachsehen, was los ist.
   Produktions-Binary liest immer das echte `/proc`. Laufende Prozesse kommen als
   JSON-Specs aus `t/fixtures/procs/`. **Für k5:** ein synthetischer Payload auf
   stdin des Produktions-Binarys liefert die Live-Entscheidung — Deny-JSON oder
-  nichts; *warum* etwas durchgeht, gibt das Binary nicht aus.
+  nichts; *warum* etwas durchgeht, gibt das Binary nicht aus (k5: dafür gibt
+  es jetzt `--explain`).
 - **Rennen, akzeptiert:** zwei Sessions im selben Moment sehen beide einen freien
   Slot; ebenso ein Befehl, dessen schwerer Prozess noch nicht läuft.
 
@@ -244,9 +245,65 @@ den Kontext. Im Normalzustand kostet loadguard **null** Kontext-Tokens.
 
 ### CLI
 
-`bin/loadguard` (auch als Hook-Einstieg): `status` (PSI, Slots, wer hält sie),
-`doctor` (cgroup-Delegation, systemd-run, Schwellwerte), `explain '<cmd>'`
-(wie würde der Hook entscheiden).
+`bin/loadguard`: `status` (PSI, Slots, wer hält sie), `doctor`
+(cgroup-Delegation, busctl, Schwellwerte), `explain '<cmd>'` (wie würde der
+Hook entscheiden). Hook-Einstieg ist seit k8 `hooks/loadguard`.
+
+Umgesetzt (k5, `bin/loadguard`, `lib/loadguard/cli.py`; Tests
+`t/test_cli.py`, `t/test_throttle.py` `Report`):
+
+- **Die Entscheidung existiert einmal, im C-Binary.** Es hat zwei Report-Modi,
+  je eine JSON-Zeile auf stdout, nur lesend: `loadguard-hook --report`
+  (Grenzen, memory PSI full/some, Swap, zram, Slots mit Haltern,
+  `refuse_heavy`; liest kein stdin) und `loadguard-hook --explain`
+  (Hook-Payload auf stdin; `decision`, `reason` wörtlich, dazu was gemessen
+  wurde). Beide rufen `objection()` und `no_room()`, die Funktionen des
+  Hook-Pfads; ein `struct verdict` hält fest, wie weit sie gekommen sind. Die
+  CLI formatiert nur: Sie klassifiziert keinen Befehl, scannt kein `/proc` und
+  vergleicht keinen Wert mit einer Grenze. Test `test_explain_is_the_hook`:
+  4 Wurzeln × 5 Umgebungen × 8 Befehle, Entscheidung und Grund wie `decide`,
+  Byte für Byte.
+- **Hook-Modus unverändert:** Jeder Aufruf außer genau `--report` oder
+  `--explain` ist der Hook wie bisher; `hooks/loadguard` startet ohne
+  Argumente. Gemessen (je 1500 Aufrufe, abwechselnd gegen HEAD, `nice`):
+  leicht 0,609 → 0,605 ms, schwer mit Scan 4,002 → 4,003 ms Median.
+- **Keine Wurzel im Produktions-Binary:** `report ROOT`/`explain ROOT` gibt es
+  nur im Testtreiber; damit sind die Formatierungen auf Fixtures getestet.
+- **Ungültige Env-Werte:** Der Report nennt gesetzte Variablen, die nichts
+  ändern (`ignored`) — Grenzen, die `env_int` verwirft (dieselbe Prüfung wie
+  der Hook), und `LOADGUARD_THROTTLE` ≠ `0`. Die Stufe-1-Variablen prüft
+  `doctor` mit `confine.env_int`.
+- **`status` unter Druck scannt nicht**, wie der Hook: Die Slot-Zeile sagt,
+  dass nichts gelesen wurde und warum (cmdline-Lesen kann auf Swap warten);
+  Druck allein verweigert. So bleibt `status` im Thrash schnell. Dazu wartet
+  die CLI höchstens 10 s auf das Binary und danach nicht auf dessen Ende — ein
+  Leser, der auf Swap wartet, stirbt nicht sofort.
+- **Welches Binary:** `$CLAUDE_PLUGIN_DATA`, wenn gesetzt — laut
+  plugins-reference bekommen es Hooks, das Bash-Tool nicht. Sonst für eine
+  installierte Kopie (`<plugins>/cache/<marketplace>/<plugin>/<version>/`)
+  deren Datenverzeichnis `<plugins>/data/<id>`, id `<plugin>@<marketplace>`
+  mit allem außer `[A-Za-z0-9_-]` als `-` (reuben: `loadguard-getty`). Im
+  Checkout `build/` (make), ohne Build das Datenverzeichnis einer
+  `--plugin-dir`-Session (`loadguard@inline` → `loadguard-inline`). Kein Glob
+  `loadguard-*`: Auf reuben liegen `loadguard-getty` und `loadguard-inline`
+  nebeneinander, mit Binarys verschiedener Stände. Ohne Binary sagen
+  `status`/`explain` klar: Pass-through, nichts wird verweigert. Ein Binary
+  ohne Report-Modus (ältere Quellen) → Hinweis, Exit 1. Die CLI baut nie;
+  `doctor` nennt den Befehl.
+- **`bin/` liegt auf dem PATH des Bash-Tools**, solange das Plugin aktiv ist
+  (plugins-reference, geprüft 2026-09-26): Das Modell kann `loadguard status`
+  selbst aufrufen. Ausgabe deshalb kurz, `label: wert`, nur ASCII.
+- **`doctor`** prüft Stufe 1 so, wie `confine()` sie sieht (`cgroup`,
+  `user_bus`, `find_busctl`, `delegated`, `lingering`, `limits`;
+  `user_bus`/`find_busctl`/`disabled` dafür aus `confine()` herausgezogen),
+  dazu ob diese Session in einem `loadguard-*.scope` liegt; Stufe 2/3: Binary
+  da, aktuell (`build.current`: Stempel gegen die Quellen neben der CLI),
+  Compiler, Report-Modus, Grenzen. Exit 1 bei jedem FAIL: Voraussetzung fehlt,
+  Binary fehlt/veraltet/ohne Report, Session nicht eingesperrt obwohl es
+  ginge, ignorierte Env-Werte. Bewusst ausgeschaltet (`=0`) ist kein Fehler.
+  Die Karte nannte `systemd-run` — seit k3 ist es `busctl`.
+- **Kosten der CLI** (reuben): `status`/`explain` ~47 ms, `doctor` ~80 ms,
+  fast nur Python-Start. Das Binary allein: `--report` ~4 ms mit Scan.
 
 ## Nicht-Ziele
 

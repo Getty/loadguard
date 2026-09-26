@@ -40,10 +40,20 @@
  * SessionStart (hooks/loadguard-confine). This hook only stays silent or
  * denies.
  *
+ * Hook mode is any call but the two below; hooks/loadguard execs the binary
+ * without arguments. For bin/loadguard (k5) there are two read-only report
+ * modes, one line of JSON on stdout each:
+ *   --report     the host as the heavy path sees it: limits, pressure, slots
+ *                (not scanned under pressure, as in the hook); reads no stdin
+ *   --explain    a hook payload on stdin: the hook's answer and what it
+ *                measured on the way
+ * Both run objection() and no_room(), the functions the hook runs; nothing
+ * in them decides on its own.
+ *
  * Built with -DLOADGUARD_TEST, main() is swapped for a test driver that
- * exposes the extraction, the matcher, the measurement and the decision
- * against a fixture root (t/test_hook_binary.py, t/test_throttle.py); the
- * production binary reads the real /proc and has no test mode.
+ * exposes the extraction, the matcher, the measurement, the decision and the
+ * reports against a fixture root (t/test_hook_binary.py, t/test_throttle.py);
+ * the production binary reads the real /proc and has no test mode.
  */
 
 #define _GNU_SOURCE
@@ -647,19 +657,29 @@ struct pressure {
     int swap;           /* all swap used in %, -1: unknown or no swap */
 };
 
+/* The avg10 figure of a PSI line ("full avg10=") in %, -1 if missing. */
+static double avg10(const char *buf, const char *key)
+{
+    const char *p = strstr(buf, key);
+    char *end;
+    double v;
+
+    if (p == NULL)
+        return -1;
+    p += strlen(key);
+    v = strtod(p, &end);
+    return end != p && v >= 0 && v <= 100 ? v : -1;
+}
+
 static void read_pressure(const char *root, struct pressure *pr)
 {
-    char buf[8192], *p, *end;
+    char buf[8192];
     unsigned long long total, avail;
 
     pr->full = -1;
     pr->swap = -1;
-    if (slurp(root, "/proc/pressure/memory", buf, sizeof buf) > 0 &&
-        (p = strstr(buf, "full avg10=")) != NULL) {
-        double v = strtod(p + 11, &end);
-        if (end != p + 11 && v >= 0 && v <= 100)
-            pr->full = v;
-    }
+    if (slurp(root, "/proc/pressure/memory", buf, sizeof buf) > 0)
+        pr->full = avg10(buf, "full avg10=");
     if (slurp(root, "/proc/meminfo", buf, sizeof buf) > 0 &&
         meminfo(buf, "SwapTotal:", &total) &&
         meminfo(buf, "SwapFree:", &avail) && total > 0 && avail <= total)
@@ -917,6 +937,30 @@ static int env_int(const char *name, int def, int lo, int hi)
     return *s == '\0' && v >= lo ? (int)v : def;
 }
 
+/* The tunable limits; the reports list the ones set but invalid. */
+enum { L_PSI_FULL, L_SWAP_USED, L_SLOTS, N_LIMITS };
+
+static const struct {
+    const char *env;
+    int lo, hi;
+} LIMITS[N_LIMITS] = {
+    [L_PSI_FULL] = {"LOADGUARD_PSI_FULL", 1, 100},
+    [L_SWAP_USED] = {"LOADGUARD_SWAP_USED", 1, 100},
+    [L_SLOTS] = {"LOADGUARD_HEAVY_SLOTS", 1, 4096},
+};
+
+static int limit(int which, int def)
+{
+    return env_int(LIMITS[which].env, def, LIMITS[which].lo, LIMITS[which].hi);
+}
+
+/* LOADGUARD_THROTTLE=0, only that exact value: pure pass-through. */
+static int throttle_off(void)
+{
+    const char *off = getenv("LOADGUARD_THROTTLE");
+    return off != NULL && strcmp(off, "0") == 0;
+}
+
 /* max(1, nproc / 2), nproc as `nproc` counts: the CPUs we may run on. */
 static int default_slots(void)
 {
@@ -984,48 +1028,68 @@ static void advice(char *r, size_t size, const struct match *m, int slots)
 }
 
 /*
+ * What the decision found out, as far as it got. The hook uses only the
+ * answer; the report modes print the rest.
+ */
+struct verdict {
+    int off;                /* LOADGUARD_THROTTLE=0: nothing looked at */
+    struct match m;         /* m.kind K_NONE: light, nothing read */
+    int pressured;          /* no_room() ran: c, pr set; pr at a limit */
+    int scanned;            /* no_room() found no pressure: c.slots, sl set */
+    struct config c;
+    struct pressure pr;
+    struct slots sl;
+};
+
+/*
+ * The heavy path: is the host out of room for one more heavy command?
+ * Memory first; only without pressure the slot scan, which reads other
+ * processes.
+ */
+static int no_room(const char *root, struct verdict *v)
+{
+    v->c.psi_full = limit(L_PSI_FULL, PSI_FULL_DEFAULT);
+    v->c.swap_used = limit(L_SWAP_USED, SWAP_USED_DEFAULT);
+    read_pressure(root, &v->pr);
+    v->scanned = 0;
+    v->pressured = v->pr.full >= v->c.psi_full || v->pr.swap >= v->c.swap_used;
+    if (v->pressured)
+        return 1;
+    v->c.slots = limit(L_SLOTS, default_slots());
+    scan_slots(root, &v->sl);
+    v->scanned = 1;
+    return v->sl.busy >= v->c.slots;
+}
+
+/*
  * The deny reason for a Bash command into reason; 0 if loadguard has no
  * objection. Light commands return before any read.
  */
-static int objection(const char *root, const char *command, char *reason,
-                     size_t size)
+static int objection(const char *root, const char *command, struct verdict *v,
+                     char *reason, size_t size)
 {
-    const char *off = getenv("LOADGUARD_THROTTLE");
-    struct pressure pr;
-    struct config c;
-    struct slots sl;
-    struct match m;
     int i;
 
-    if (off != NULL && strcmp(off, "0") == 0)
+    v->m.kind = K_NONE;
+    v->pressured = v->scanned = 0;
+    v->off = throttle_off();
+    if (v->off || heavy_command(command, &v->m) == K_NONE)
         return 0;
-    if (heavy_command(command, &m) == K_NONE)
+    if (!no_room(root, v))
         return 0;
 
-    c.psi_full = env_int("LOADGUARD_PSI_FULL", PSI_FULL_DEFAULT, 1, 100);
-    c.swap_used = env_int("LOADGUARD_SWAP_USED", SWAP_USED_DEFAULT, 1, 100);
-    read_pressure(root, &pr);
     reason[0] = '\0';
-    if (pr.full >= c.psi_full || pr.swap >= c.swap_used) {
-        add(reason, size, "loadguard: heavy command refused (%s): ", m.label);
-        measures(reason, size, root, &pr, &c);
-        advice(reason, size, &m, 0);
-        return 1;
+    add(reason, size, "loadguard: heavy command refused (%s): ", v->m.label);
+    if (v->scanned) {
+        add(reason, size, "%d/%d heavy slots busy (", v->sl.busy, v->c.slots);
+        for (i = 0; i < v->sl.shown; i++)
+            add(reason, size, "%s%s", i ? "; " : "", v->sl.holder[i]);
+        if (v->sl.busy > v->sl.shown)
+            add(reason, size, "; +%d more", v->sl.busy - v->sl.shown);
+        add(reason, size, "), ");
     }
-
-    c.slots = env_int("LOADGUARD_HEAVY_SLOTS", default_slots(), 1, 4096);
-    scan_slots(root, &sl);
-    if (sl.busy < c.slots)
-        return 0;
-    add(reason, size, "loadguard: heavy command refused (%s): "
-        "%d/%d heavy slots busy (", m.label, sl.busy, c.slots);
-    for (i = 0; i < sl.shown; i++)
-        add(reason, size, "%s%s", i ? "; " : "", sl.holder[i]);
-    if (sl.busy > sl.shown)
-        add(reason, size, "; +%d more", sl.busy - sl.shown);
-    add(reason, size, "), ");
-    measures(reason, size, root, &pr, &c);
-    advice(reason, size, &m, 1);
+    measures(reason, size, root, &v->pr, &v->c);
+    advice(reason, size, &v->m, v->scanned);
     return 1;
 }
 
@@ -1060,12 +1124,148 @@ static void hook(const char *root, const cJSON *payload)
 {
     const cJSON *input = bash_tool_input(payload);
     char reason[REASON_MAX];
+    struct verdict v;
 
     if (input != NULL &&
         objection(root,
                   cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
-                  reason, sizeof reason))
+                  &v, reason, sizeof reason))
         deny(reason);
+}
+
+/* ------------------------------------------------------------------------
+ * Report modes for bin/loadguard (k5): what objection() and no_room() found,
+ * as one line of JSON. Figures no decision uses (PSI some, zram) are read
+ * here, after the fact.
+ */
+
+#define REPORT_FORMAT 1
+
+/* A percentage, or null where the source gave none (-1). */
+static void put_percent(cJSON *o, const char *key, double v)
+{
+    if (v >= 0)
+        cJSON_AddNumberToObject(o, key, v);
+    else
+        cJSON_AddNullToObject(o, key);
+}
+
+/* Memory PSI some avg10 in %, -1 if unknown. Info: the hook uses full. */
+static double psi_some(const char *root)
+{
+    char buf[8192];
+
+    if (slurp(root, "/proc/pressure/memory", buf, sizeof buf) <= 0)
+        return -1;
+    return avg10(buf, "some avg10=");
+}
+
+/* The common head; "ignored": variables set that change nothing. */
+static cJSON *report_start(const char *mode, int off)
+{
+    cJSON *out = cJSON_CreateObject(), *ignored;
+    int i;
+
+    cJSON_AddNumberToObject(out, "report", REPORT_FORMAT);
+    cJSON_AddStringToObject(out, "mode", mode);
+    cJSON_AddBoolToObject(out, "throttle", !off);
+    ignored = cJSON_AddArrayToObject(out, "ignored");
+    if (getenv("LOADGUARD_THROTTLE") != NULL && !off)
+        cJSON_AddItemToArray(ignored,
+                             cJSON_CreateString("LOADGUARD_THROTTLE"));
+    for (i = 0; i < N_LIMITS; i++)
+        if (getenv(LIMITS[i].env) != NULL && limit(i, -1) < 0)
+            cJSON_AddItemToArray(ignored, cJSON_CreateString(LIMITS[i].env));
+    return out;
+}
+
+/* What no_room() measured: limits, pressure, and the slots if scanned. */
+static void put_room(cJSON *out, const char *root, const struct verdict *v,
+                     int slot_limit)
+{
+    cJSON *o = cJSON_AddObjectToObject(out, "limits"), *holders;
+    int i;
+
+    cJSON_AddNumberToObject(o, "psi_full", v->c.psi_full);
+    cJSON_AddNumberToObject(o, "swap_used", v->c.swap_used);
+    if (slot_limit)
+        cJSON_AddNumberToObject(o, "slots", v->c.slots);
+    o = cJSON_AddObjectToObject(out, "pressure");
+    put_percent(o, "full", v->pr.full);
+    put_percent(o, "some", psi_some(root));
+    put_percent(o, "swap", v->pr.swap);
+    put_percent(o, "zram", zram_fill(root));
+    cJSON_AddBoolToObject(out, "pressured", v->pressured);
+    if (!v->scanned) {
+        cJSON_AddNullToObject(out, "slots");
+        return;
+    }
+    o = cJSON_AddObjectToObject(out, "slots");
+    cJSON_AddNumberToObject(o, "busy", v->sl.busy);
+    holders = cJSON_AddArrayToObject(o, "holders");
+    for (i = 0; i < v->sl.shown; i++)
+        cJSON_AddItemToArray(holders, cJSON_CreateString(v->sl.holder[i]));
+}
+
+/* One line on stdout; 1 if it could not be built. */
+static int report_print(cJSON *out)
+{
+    char *text = cJSON_PrintUnformatted(out);
+    int rc = text != NULL && puts(text) >= 0 ? 0 : 1;
+
+    cJSON_free(text);
+    cJSON_Delete(out);
+    return rc;
+}
+
+/* --report: the host as the heavy path sees it right now. */
+static int report_status(const char *root)
+{
+    struct verdict v;
+    cJSON *out;
+    int full;
+
+    v.off = throttle_off();
+    full = no_room(root, &v);
+    if (!v.scanned)
+        v.c.slots = limit(L_SLOTS, default_slots());
+    out = report_start("status", v.off);
+    put_room(out, root, &v, 1);
+    cJSON_AddBoolToObject(out, "refuse_heavy", !v.off && full);
+    return report_print(out);
+}
+
+/* --explain: the hook's answer to one payload and what it looked at. */
+static int report_explain(const char *root, const cJSON *payload)
+{
+    const cJSON *input = bash_tool_input(payload);
+    char reason[REASON_MAX];
+    struct verdict v;
+    int denied = 0;
+    cJSON *out;
+
+    if (input == NULL) {
+        out = report_start("explain", throttle_off());
+        cJSON_AddBoolToObject(out, "bash", 0);
+    } else {
+        denied = objection(root, cJSON_GetObjectItemCaseSensitive(
+                               input, "command")->valuestring,
+                           &v, reason, sizeof reason);
+        out = report_start("explain", v.off);
+        cJSON_AddBoolToObject(out, "bash", 1);
+        if (v.m.kind == K_NONE)
+            cJSON_AddNullToObject(out, "heavy");
+        else
+            cJSON_AddStringToObject(out, "heavy", v.m.label);
+        if (!v.off && v.m.kind != K_NONE)
+            put_room(out, root, &v, v.scanned);
+    }
+    cJSON_AddStringToObject(out, "decision", denied ? "deny" : "allow");
+    if (denied)
+        cJSON_AddStringToObject(out, "reason", reason);
+    else
+        cJSON_AddNullToObject(out, "reason");
+    return report_print(out);
 }
 
 #ifndef LOADGUARD_TEST
@@ -1084,15 +1284,26 @@ static int blank(const char *s, size_t n)
     return 1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int explain = argc == 2 && strcmp(argv[1], "--explain") == 0;
     size_t len = 0;
     char *buf;
     cJSON *payload;
 
     /* A closed stdout must not kill the hook: exit 0 all the same. */
     signal(SIGPIPE, SIG_IGN);
+    if (argc == 2 && strcmp(argv[1], "--report") == 0)
+        return report_status("");
     buf = read_stdin(&len);
+    if (explain) {
+        int rc;
+        payload = buf != NULL ? parse_payload(buf, len) : NULL;
+        free(buf);
+        rc = report_explain("", payload);
+        cJSON_Delete(payload);
+        return rc;
+    }
     if (buf == NULL) {
         note("stdin unreadable or too large");
         return 0;
@@ -1123,6 +1334,8 @@ int main(void)
  *   slots ROOT     any payload: busy count, then one holder per line
  *   decide ROOT    exactly what the hook prints, with /proc and /sys below
  *                  ROOT
+ *   report ROOT    any payload: what --report prints, below ROOT
+ *   explain ROOT   any payload: what --explain prints, below ROOT
  * Exit 1 if a Bash payload is needed and missing, 64 on usage.
  */
 int main(int argc, char **argv)
@@ -1157,6 +1370,10 @@ int main(int argc, char **argv)
             printf("%s\n", sl.holder[i]);
     } else if (argc == 3 && strcmp(mode, "decide") == 0) {
         hook(argv[2], payload);
+    } else if (argc == 3 && strcmp(mode, "report") == 0) {
+        rc = report_status(argv[2]);
+    } else if (argc == 3 && strcmp(mode, "explain") == 0) {
+        rc = report_explain(argv[2], payload);
     } else if (argc == 2 && (strcmp(mode, "command") == 0 ||
                              strcmp(mode, "heavy") == 0)) {
         rc = 1;

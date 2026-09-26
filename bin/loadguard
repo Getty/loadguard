@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+# loadguard — the CLI (k5). On the Bash tool's PATH while the plugin is
+# enabled, so the model can run it too.
+#
+#   loadguard status               memory pressure, heavy slots and who holds
+#                                  them, this session's scope
+#   loadguard doctor               can loadguard work here; exit 1 if not
+#   loadguard explain '<command>'  what the hook would do with it now, dry
+#
+# The decisions come from the hook binary's read-only report modes; see
+# lib/loadguard/cli.py. Nothing here builds or refuses anything.
+
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    from loadguard.cli import main
+    sys.exit(main(sys.argv[1:], ROOT))
