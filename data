@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-26T17:08:47Z
+claimed_by: loadguard
+class: standard
+completed: 2026-09-26T17:08:47Z
+created: 2026-09-26T01:16:10Z
+id: 9
+priority: medium
+started: 2026-09-26T17:08:47Z
+status: done
+tags:
+- docs
+title: README, LICENSE und Titelbild (Hausstil)
+updated: 2026-09-26T17:08:47Z
+---
+
+Repo ist public (github.com/Getty/loadguard), hat aber weder README noch LICENSE. plugin.json nennt Artistic-2.0 → LICENSE wie ~/dev/briefing/LICENSE. README im Stil von ~/dev/briefing/README.md: Problem (belegt mit ~/load-incidents, ohne Prozesslisten), Mechanismus, Stufen, Installation (erst wenn installierbar), Status. Titelbild assets/github.png liefert Getty (Prompt im Chat 2026-09-26).
+
+2026-09-26 02:57 Figures re-derived from ~/load-incidents via parse_incident: 54 snapshots, swap 100 % in 33, memory PSI full avg10 <=2.03 % or >=45.47 % (max 84.51), max load 84.90 (20260909-070045). Also found: design.md says 'Load bis 45', the real max is 85 — design.md not touched (out of card). Image line left out until Getty delivers assets/github.png.
+
+2026-09-26 02:57 Done: LICENSE (verbatim copy of ~/dev/briefing/LICENSE, Artistic 2.0, Copyright (c) 2026 Torsten Raudssus) and README.md (English: problem with incident figures, session scope vs rewrite, status, requirements, env config with defaults, install via Getty/marketplace with 'claude plugin' syntax checked against --help, turning off, Codex note, develop, license). No code changes; 115 tests OK.
+
+2026-09-26 03:00 Committed: 216830d (Add README and Artistic 2.0 LICENSE, k9) + 34a2688 (Correct max load figure in design.md to 85, separate small commit, not part of k9). Bild ausstehend, Getty liefert assets/github.png. Card zurueck auf todo bis Titelbild da ist.
+
+2026-09-26 17:08 Committed: 03094a2 (Add title image and finish install docs in README, k9). Design.md live-verification note (k6) went into a separate commit b2e43d5, not part of k9. Tests: 252 OK, 0 skipped.
