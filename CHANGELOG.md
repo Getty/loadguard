@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- README.md (problem, mechanism, stages, status) and LICENSE (Artistic 2.0,
+  Copyright (c) 2026 Torsten Raudssus) added; the repo is public
+  (github.com/Getty/loadguard). Title image still pending.
 - SessionStart now confines each session: a new hook (`hooks/loadguard-confine`,
   `lib/loadguard/confine.py`) moves the claude process into its own systemd
   user scope (`app-loadguard.slice/loadguard-<session>-<pid>.scope`) via
