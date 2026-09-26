@@ -1,13 +1,14 @@
 #!/bin/sh
-# loadguard — PreToolUse hook on Bash: the starter.
+# loadguard — PreToolUse hook on Bash, and UserPromptSubmit/SessionStart for
+# the context line (k6): the starter.
 #
 # Hands stdin to the compiled hook, ${CLAUDE_PLUGIN_DATA}/bin/loadguard-hook,
 # by exec: no extra process, its stdout and exit code are Claude Code's.
 # The data dir comes as $1 (hooks.json), else from the environment.
 #
 # No binary yet (no compiler, build still running or failed): exit 0 with
-# nothing on stdout — pass-through, the command runs as is. The build happens
-# on SessionStart (hooks/loadguard-build), never here.
+# nothing on stdout — pass-through, the command runs as is, no context. The
+# build happens on SessionStart (hooks/loadguard-build), never here.
 d=${1:-${CLAUDE_PLUGIN_DATA:-}}
 [ -n "$d" ] && [ -x "$d/bin/loadguard-hook" ] && exec "$d/bin/loadguard-hook"
 exit 0

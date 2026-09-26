@@ -214,11 +214,20 @@ sonst kann die KI nicht einmal nachsehen, was los ist.
   > t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0%
   > (limit 10%), swap 60% used (limit 90%), zram 97% full.
   > Wait for one to finish, then retry; light commands (git status, ls, cat) still
-  > run. Or run a single test file instead of the whole suite.
+  > run. When you retry, run a single test file instead of the whole suite.
 
   Unter Druck: `…: memory pressure full=59.9% (limit 10%), swap 100% used (limit
-  90%). Wait and retry later; …`. Rat je Muster: prove → `prove -l t/foo.t` statt
-  `-r`; Testsuite → eine Testdatei; `claude -p`/`--bg` → keine neuen Sessions.
+  90%).` / `Wait and retry later; light commands (git status, ls, cat) still
+  run.` Rat je Muster nur bei vollen Slots, und zwar für den nächsten Versuch —
+  auch ein kleiner Lauf ist schwer und braucht einen Slot: prove → `When you
+  retry, run fewer tests: prove -l t/foo.t instead of -r`; Testsuite → eine
+  Testdatei. `claude -p`/`--bg` → keine neuen Sessions, in beiden Fällen.
+  **Unter Druck kein Testlauf als Rat** (korrigiert in k6, k4 war
+  unveröffentlicht): Jeder Lauf zieht Speicher, ein einzelnes perl kann die
+  Maschine nehmen (der 3,8-GB-Einzeiler, 20260917-175030), und `prove -l
+  t/foo.t` würde unter Druck ebenso verweigert. Einen Befehl zu nennen, den der
+  Klassifizierer durchlässt (`perl -Ilib t/foo.t`), hieße, der KI den Weg um
+  den eigenen Wächter zu zeigen. Also: warten, leichte Befehle gehen.
   Höchstens drei Halter, dann `+N more`; Pfade mit `~`, Steuerzeichen und
   ungültiges UTF-8 als `?`.
 - **Kosten** (reuben, 297 Prozesse, je 300 Läufe inkl. Prozessstart, `nice`):
@@ -242,6 +251,70 @@ sonst kann die KI nicht einmal nachsehen, was los ist.
 
 `UserPromptSubmit`/`SessionStart`: nur wenn die Last erhöht ist, eine Zeile Status in
 den Kontext. Im Normalzustand kostet loadguard **null** Kontext-Tokens.
+
+Umgesetzt (k6, `src/loadguard-hook.c`, `hooks/hooks.json`; Tests
+`t/test_throttle.py` `Context`, `Calibration`, `LiveHost`,
+`t/test_hook_passthrough.py`):
+
+- **Signal = die Druck-Hälfte von k4, genau** (Getty 2026-09-26: wie k4, nicht
+  zram): memory `full avg10` ≥ `LOADGUARD_PSI_FULL` oder Swap gesamt ≥
+  `LOADGUARD_SWAP_USED`. `under_pressure()` ist die erste Hälfte von
+  `no_room()`, beide rufen sie — kein zweiter Vergleich, keine eigene
+  Schwelle. **Volle Slots allein geben keine Zeile:** Der Host ist dann in
+  Ordnung, ein Slot wird bald frei, und der Deny-Grund sagt es im Moment des
+  Versuchs. Kein Slot-Scan, also liest der Pfad auch im Ruhezustand keinen
+  fremden Prozess (Test: cmdline als FIFO). `Calibration`: in allen 54
+  Snapshots bekommt Thrash die Zeile, ruhig bleibt stumm.
+- **Dasselbe Binary, derselbe Starter:** `hook()` verzweigt auf
+  `hook_event_name` — `UserPromptSubmit`/`SessionStart` → Zeile oder nichts,
+  alles andere → der PreToolUse-Pfad wie bisher (auch ohne
+  `hook_event_name`). Kein Python: UserPromptSubmit läuft vor jedem Prompt
+  jeder Session.
+- **Kanal:** `{"hookSpecificOutput":{"hookEventName":"<Event>",
+  "additionalContext":"<Zeile>"}}`, ohne Zeilenumbruch, exit 0. Laut
+  Hooks-Docs (code.claude.com/docs/en/hooks, gelesen 2026-09-26) landen bei
+  beiden Events Plain-stdout **und** `additionalContext` als System-Reminder
+  im Kontext: UserPromptSubmit neben dem Prompt, SessionStart vor dem ersten.
+  JSON, weil Codex (k11) dieselbe Form annimmt, aber unbekannte
+  Top-Level-Keys ablehnt; deshalb nur `hookSpecificOutput`.
+- **Synchron.** Async-Hooks werden laut Docs nicht verworfen: ihr
+  `additionalContext` kommt „on the next conversation turn", und `-p` killt
+  sie beim Beenden — für SessionStart zu spät oder gar nicht. Synchron kostet
+  ~0,6 ms; Claudes erste Antwort wartet ohnehin auf die SessionStart-Hooks.
+  Timeout 5 s wie PreToolUse (Default auf UserPromptSubmit: 30 s; ein
+  Timeout verwirft die Ausgabe, der Prompt geht ohne Zeile durch).
+- **Nie exit 2:** Auf UserPromptSubmit blockiert exit 2 den Prompt und löscht
+  ihn. Jeder Pfad endet mit exit 0; Test: Produktions-Binary direkt und über
+  den Starter, gültige, kaputte, leere und zu große Payloads, drei
+  Umgebungen.
+- **Die Zeile**, englisch, eine Zeile, höchstens 216 Zeichen (100 % gegen
+  Grenzen von 100 %), Tatsachen statt Anweisungen — die Docs warnen, dass als
+  System-Anweisung formulierter Text die Prompt-Injection-Abwehr auslösen
+  kann:
+
+  > loadguard: memory pressure full=59.9% (limit 10%), swap 100% used (limit
+  > 90%). Heavy commands refused until it eases: prove, make test, builds, new
+  > claude -p/--bg. Light commands still run; see `loadguard status`.
+
+  Die Zahlen formatiert `pressure_figures()`, wie im Deny-Grund (dort folgt
+  zram). **Kein Testlauf als Rat**, auch kein kleiner — aus demselben Grund
+  wie im Deny-Grund unter Druck (k4 oben): Jeder Lauf zieht Speicher, und ein
+  Befehl, den der Klassifizierer durchlässt (ein erster Entwurf nannte `perl
+  -Ilib t/x.t`), zeigte der KI den Weg um den Wächter. `loadguard status`
+  geht, weil `bin/` auf dem PATH des Bash-Tools liegt (k5).
+- **Kein Zustand:** Unter Druck bekommt jeder Prompt die Zeile, kein Dedup —
+  Einfachheit vor ein paar Tokens in einem seltenen Zustand.
+- **`LOADGUARD_THROTTLE=0` schaltet auch die Zeile ab:** Ohne Verweigern wäre
+  sie falsch. Ein Schalter für „nichts verweigern, nichts melden".
+- **Report-Modi:** keine neue Angabe. `--report` hat `throttle` und
+  `pressured`; die Zeile erscheint genau, wenn beide `true` sind (Test
+  `test_same_pressure_as_the_hook`, samt denselben Zahlen wie im Deny-Grund).
+- **Kosten** (reuben, je 1500 Läufe abwechselnd gegen HEAD, `nice`):
+  PreToolUse leicht 0,559 → 0,555 ms, schwer 4,139 → 4,130 ms Median —
+  unverändert. UserPromptSubmit ruhig 0,61 ms, SessionStart 0,68 ms, mit
+  Zeile (Grenzen per Env erzwungen) 0,60 ms.
+- **Erste Session nach der Installation:** Das Binary wird async gebaut, bis
+  dahin gibt der Starter nichts aus — keine Zeile, fail-open wie PreToolUse.
 
 ### CLI
 

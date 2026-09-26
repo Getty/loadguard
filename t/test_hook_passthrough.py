@@ -15,6 +15,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hooks", "loadguard")
 FIXTURES = os.path.join(ROOT, "t", "fixtures")
+EVENTS = os.path.join(FIXTURES, "events")
 
 # Wall-clock per run; only catches hangs. Far below the 5 s hook timeout.
 BUDGET_S = 1.0
@@ -60,6 +61,15 @@ class StarterWithoutBinary(unittest.TestCase):
                     self.assertEqual(proc.returncode, 0, proc.stderr)
                     self.assertEqual(proc.stdout, b"")
                     self.assertEqual(proc.stderr, b"")
+
+    def test_event_payloads_pass_through_silently(self):
+        # UserPromptSubmit and SessionStart (k6): no binary, no context.
+        for name in sorted(os.listdir(EVENTS)):
+            with self.subTest(fixture=name):
+                with open(os.path.join(EVENTS, name), "rb") as f:
+                    proc = run_starter([self.data], f.read())
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                                 (0, b"", b""))
 
     def test_closed_stdin(self):
         proc = subprocess.run([HOOK, self.data], stdin=subprocess.DEVNULL,
@@ -136,6 +146,18 @@ class PayloadFields(unittest.TestCase):
         self.assertTrue(
             self.payload("bash-background.json")["tool_input"]["run_in_background"])
 
+    def test_context_event_fixtures(self):
+        # Reconstructed from the docs' examples (k6); the event name is all
+        # the hook reads of them. No tool_name: the Bash path never applies.
+        for name, event in (("user-prompt-submit.json", "UserPromptSubmit"),
+                            ("session-start.json", "SessionStart")):
+            with self.subTest(fixture=name):
+                with open(os.path.join(EVENTS, name), "rb") as f:
+                    p = json.load(f)
+                self.assertEqual(p["hook_event_name"], event)
+                self.assertNotIn("tool_name", p)
+                self.assertIsInstance(p["session_id"], str)
+
     def test_recorded_tool_input_holds_only_what_the_model_set(self):
         # Recorded (k7): no defaults are filled in — description, timeout and
         # run_in_background are present only if the model passed them.
@@ -159,24 +181,42 @@ class PluginWiring(unittest.TestCase):
         self.assertIn("version", manifest)
 
     def test_events(self):
-        self.assertEqual(sorted(self.hooks), ["PreToolUse", "SessionStart"])
+        self.assertEqual(sorted(self.hooks),
+                         ["PreToolUse", "SessionStart", "UserPromptSubmit"])
 
-    def test_pre_tool_use_runs_the_starter(self):
-        (entry,) = self.hooks["PreToolUse"]
-        self.assertEqual(entry["matcher"], "Bash")
-        (hook,) = entry["hooks"]
+    def assert_starter(self, hook):
         self.assertEqual(hook["type"], "command")
         # Exec form (args set): no shell between Claude Code and the starter.
         # Without args support it degrades to shell form and the starter
         # reads $CLAUDE_PLUGIN_DATA from the environment instead.
         self.assertEqual(hook["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard")
         self.assertEqual(hook["args"], ["${CLAUDE_PLUGIN_DATA}"])
+        # Synchronous: an async hook's decision has no effect, and its
+        # context arrives a turn late (-p kills it at teardown).
         self.assertNotIn("async", hook)
-        # Seconds. Short, so a hang costs one Bash call at most 5 s instead of
-        # the 600 s default; on timeout Claude Code drops the hook and runs
-        # the command (fail open).
+        # Seconds. Short, so a hang costs one Bash call or one prompt at most
+        # 5 s instead of the 600 s (30 s on UserPromptSubmit) default; on
+        # timeout Claude Code drops the hook's output and goes on (fail open).
         self.assertLessEqual(hook["timeout"], 5)
         self.assertGreater(hook["timeout"], BUDGET_S)
+
+    def test_pre_tool_use_runs_the_starter(self):
+        (entry,) = self.hooks["PreToolUse"]
+        self.assertEqual(entry["matcher"], "Bash")
+        (hook,) = entry["hooks"]
+        self.assert_starter(hook)
+
+    def test_user_prompt_submit_runs_the_starter(self):
+        # Stage 4 (k6): the context line, only under memory pressure.
+        # UserPromptSubmit takes no matcher.
+        (entry,) = self.hooks["UserPromptSubmit"]
+        self.assertEqual(list(entry), ["hooks"])
+        (hook,) = entry["hooks"]
+        self.assert_starter(hook)
+
+    def test_session_start_runs_the_starter(self):
+        # Stage 4 (k6), the same line at session start (any source).
+        self.assert_starter(self.session_start_hook("loadguard"))
 
     def session_start_hook(self, name):
         (entry,) = self.hooks["SessionStart"]
@@ -184,7 +224,7 @@ class PluginWiring(unittest.TestCase):
         found = [h for h in entry["hooks"]
                  if h["command"] == "${CLAUDE_PLUGIN_ROOT}/hooks/" + name]
         self.assertEqual(len(found), 1, name)
-        self.assertEqual(len(entry["hooks"]), 2)
+        self.assertEqual(len(entry["hooks"]), 3)
         self.assertTrue(os.access(os.path.join(ROOT, "hooks", name), os.X_OK))
         return found[0]
 

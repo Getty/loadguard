@@ -27,6 +27,19 @@ counterpart yet. Their `tool_input` shows keys a real payload may lack.
 | `not-an-object.json` | synthetic | valid JSON, not an object |
 | `invalid-utf8.json` | synthetic | bytes that are not UTF-8 |
 
+## `events/` — reconstructed, the context events (k6)
+
+UserPromptSubmit and SessionStart payloads for the context line, copied from the
+examples at https://code.claude.com/docs/en/hooks as read on 2026-09-26 (the
+SessionStart one with `source: "startup"` instead of the documented resume).
+No recorded counterpart yet. The hook reads only `hook_event_name` of them; the
+tests replace fields to build broken and foreign variants.
+
+| File | Event |
+|---|---|
+| `user-prompt-submit.json` | `UserPromptSubmit`, with `prompt` |
+| `session-start.json` | `SessionStart`, `source: "startup"`, `model` |
+
 ## `updated-input/` — recorded, pins `updatedInput` semantics
 
 Same session. Per probe: `.pre.json` (PreToolUse payload), `.hook-out.json` (what

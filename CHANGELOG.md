@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Under memory pressure the model now hears it before it tries (k6): on
+  `UserPromptSubmit` and `SessionStart` the hook binary adds one line of
+  context, as `hookSpecificOutput.additionalContext` —
+  `` `loadguard: memory pressure full=59.9% (limit 10%), swap 100% used (limit
+  90%). Heavy commands refused until it eases: prove, make test, builds, new
+  claude -p/--bg. Light commands still run; see `loadguard status`.` `` — and
+  nothing at all otherwise: a calm host costs no context. Like the refusal
+  under pressure, it suggests no test run at all.
+  It is the refusals' own pressure test (memory PSI `full avg10` at
+  `LOADGUARD_PSI_FULL` or all swap at `LOADGUARD_SWAP_USED`), run by the
+  same function; busy heavy slots alone add no line, and the path reads no
+  process. Every prompt gets the line while the pressure lasts, nothing is
+  remembered between prompts; `LOADGUARD_THROTTLE=0` turns it off along
+  with the refusals. Both hooks run the existing starter synchronously with
+  a 5 s timeout, and the binary branches on `hook_event_name`: `PreToolUse`
+  behaves and costs as before (0.555 ms light, 4.13 ms heavy on reuben),
+  the new path takes about 0.6 ms and reads only `/proc/pressure/memory`
+  and `/proc/meminfo`. It never exits 2, which on `UserPromptSubmit` would
+  erase the user's prompt. Checked against every incident snapshot: the
+  thrashing ones get the line, the calm ones nothing. 21 new tests.
 - New CLI `bin/loadguard` (k5), on the Bash tool's `PATH` while the plugin
   is enabled, so the model can run it too: `loadguard status` (memory PSI
   full/some, swap, zram, the limits in effect, heavy slots busy and who holds
@@ -39,8 +59,12 @@
   cmdline may have to come back from swap, and a timed-out hook would let the
   command run. The reason, in English, gives the figures (PSI vs limit, swap,
   zram as information, busy/total slots and who holds them, e.g.
-  `prove -lr t/ in ~/dev/sunriser`) and an alternative (wait; `prove -l
-  t/foo.t` instead of `-r`; no new `claude -p`). Light commands still read
+  `prove -lr t/ in ~/dev/sunriser`) and what to do: wait, light commands
+  still run, no new `claude -p`; with every slot busy, a smaller run for the
+  retry (`prove -l t/foo.t` instead of `-r`), which needs a slot too. Under
+  memory pressure it suggests no test run at all, not even a single file:
+  every run adds memory, and one `perl` one-liner held 3.8 GB in the
+  incidents. Light commands still read
   nothing but stdin. Thresholds from the 54 incident snapshots: calm memory
   `full avg10` <= 2.03 % and swap <= 68 %, thrash >= 45.47 % and >= 92 %.
   Tunable through `LOADGUARD_PSI_FULL`, `LOADGUARD_SWAP_USED`,

@@ -23,11 +23,11 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | Pfad | Inhalt |
 |---|---|
 | `.claude-plugin/plugin.json` | Plugin-Manifest |
-| `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build, PreToolUse auf Bash) |
-| `hooks/loadguard` | sh-Starter: `exec` des C-Binarys, ohne Binary `exit 0` |
+| `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build + Lage-Zeile, UserPromptSubmit: Lage-Zeile, PreToolUse auf Bash) |
+| `hooks/loadguard` | sh-Starter für PreToolUse, UserPromptSubmit und SessionStart: `exec` des C-Binarys, ohne Binary `exit 0` |
 | `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits |
 | `hooks/loadguard-build` | SessionStart: baut das Binary nach `${CLAUDE_PLUGIN_DATA}/bin/`, abgekoppelt |
-| `src/loadguard-hook.c` | Hook-Pfad in C (verweigert schwere Befehle unter Druck oder bei vollen Slots, sonst still; schreibt Befehle nie um; Report-Modi für die CLI) |
+| `src/loadguard-hook.c` | Hook-Pfad in C (verweigert schwere Befehle unter Druck oder bei vollen Slots, Lage-Zeile nur unter Druck, sonst still; schreibt Befehle nie um; Report-Modi für die CLI) |
 | `vendor/cJSON/` | cJSON unverändert, Version und SHA256 in `README` |
 | `Makefile` | `make` → `build/bin/`, `make test`, `make clean` |
 | `bin/loadguard` | CLI (`status`, `doctor`, `explain`) |

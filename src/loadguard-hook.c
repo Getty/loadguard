@@ -1,9 +1,15 @@
 /*
- * loadguard-hook — PreToolUse hook on Bash, the compiled path (k8, k4).
+ * loadguard-hook — PreToolUse hook on Bash, the compiled path (k8, k4); also
+ * UserPromptSubmit and SessionStart (k6).
  *
  * Silent (no stdout, exit 0: the command runs as is) unless the command is
  * heavy and the host has no room for it. Then it prints the documented deny
  * JSON, whose reason Claude Code hands to the model — still exit 0.
+ *
+ * On UserPromptSubmit and SessionStart (hook_event_name) it prints one line
+ * of context while memory is under pressure (no room, point 1 below; full
+ * slots alone do not count) and nothing otherwise: zero context tokens when
+ * calm. No slot scan, no state across prompts.
  *
  * Heavy: a simple command of the Bash string — at its start, after ; & | ( )
  * ` or a newline, past VAR=x assignments and prefixes like nice, timeout or
@@ -24,21 +30,24 @@
  *     by the text of the Bash wrapper around them, and only the topmost
  *     heavy process of a chain counts (prove's perl children, a recursive
  *     make). claude -p/--bg sessions hold no slot; what they run does.
- * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through.
+ * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through, and no
+ * context line — nothing is refused, so there is nothing to warn about.
  *
  * Fail open: whatever goes wrong (empty or oversized stdin, not UTF-8, broken
  * JSON, missing fields, out of memory) ends in exit 0 with nothing on stdout.
  * An unreadable measurement counts as room: no PSI, no swap figure, no /proc
  * entry — no objection from that source. Never exit 2: that is the only
- * code with which a hook blocks regardless of its output.
+ * code with which a hook blocks regardless of its output — on
+ * UserPromptSubmit it would erase the user's prompt.
  *
- * Cheap: no fork, no exec, no file other than stdin on the light path. JSON
+ * Cheap: no fork, no exec, no file other than stdin on the light path; the
+ * context events read /proc/pressure/memory and /proc/meminfo only. JSON
  * only via the vendored cJSON (vendor/cJSON/) — commands carry escapes,
  * heredocs, Unicode.
  *
  * Commands are never rewritten (k3): confinement is per session, done on
- * SessionStart (hooks/loadguard-confine). This hook only stays silent or
- * denies.
+ * SessionStart (hooks/loadguard-confine). This hook only stays silent,
+ * denies, or adds its line of context.
  *
  * Hook mode is any call but the two below; hooks/loadguard execs the binary
  * without arguments. For bin/loadguard (k5) there are two read-only report
@@ -987,11 +996,10 @@ static void add(char *buf, size_t size, const char *fmt, ...)
     va_end(ap);
 }
 
-static void measures(char *r, size_t size, const char *root,
-                     const struct pressure *pr, const struct config *c)
+/* "memory pressure full=59.9% (limit 10%), swap 100% used (limit 90%)" */
+static void pressure_figures(char *r, size_t size, const struct pressure *pr,
+                             const struct config *c)
 {
-    int zram = zram_fill(root);
-
     if (pr->full >= 0)
         add(r, size, "memory pressure full=%.1f%% (limit %d%%)", pr->full,
             c->psi_full);
@@ -999,11 +1007,26 @@ static void measures(char *r, size_t size, const char *root,
         add(r, size, "memory pressure n/a");
     if (pr->swap >= 0)
         add(r, size, ", swap %d%% used (limit %d%%)", pr->swap, c->swap_used);
+}
+
+static void measures(char *r, size_t size, const char *root,
+                     const struct pressure *pr, const struct config *c)
+{
+    int zram = zram_fill(root);
+
+    pressure_figures(r, size, pr, c);
     if (zram >= 0)
         add(r, size, ", zram %d%% full", zram);
     add(r, size, ".\n");
 }
 
+/*
+ * Under memory pressure no test run is advised, not even a small one: any
+ * run adds memory, one perl can take the box (the 3.8 GB one-liner,
+ * 20260917-175030), and naming a command the classifier lets through would
+ * teach the way around the guard. With full slots, a smaller run is advice
+ * for the retry — it is heavy too and needs a slot.
+ */
 static void advice(char *r, size_t size, const struct match *m, int slots)
 {
     add(r, size, "%s; light commands (git status, ls, cat) still run.",
@@ -1011,12 +1034,14 @@ static void advice(char *r, size_t size, const struct match *m, int slots)
               : "Wait and retry later");
     switch (m->kind) {
     case K_PROVE:
-        add(r, size, " Or run fewer tests at once: `prove -l t/foo.t` "
-            "instead of `-r`.");
+        if (slots)
+            add(r, size, " When you retry, run fewer tests: "
+                "`prove -l t/foo.t` instead of `-r`.");
         break;
     case K_SUITE:
-        add(r, size, " Or run a single test file instead of the whole "
-            "suite.");
+        if (slots)
+            add(r, size, " When you retry, run a single test file instead "
+                "of the whole suite.");
         break;
     case K_CLAUDE:
         add(r, size, " Do not start new `claude -p`/`claude --bg` sessions "
@@ -1042,18 +1067,28 @@ struct verdict {
 };
 
 /*
- * The heavy path: is the host out of room for one more heavy command?
- * Memory first; only without pressure the slot scan, which reads other
- * processes.
+ * Memory under pressure: PSI full avg10 or all swap used at its limit. Two
+ * kernel files, no process. The first half of no_room(), and all the
+ * context line (k6) asks.
  */
-static int no_room(const char *root, struct verdict *v)
+static int under_pressure(const char *root, struct verdict *v)
 {
     v->c.psi_full = limit(L_PSI_FULL, PSI_FULL_DEFAULT);
     v->c.swap_used = limit(L_SWAP_USED, SWAP_USED_DEFAULT);
     read_pressure(root, &v->pr);
     v->scanned = 0;
     v->pressured = v->pr.full >= v->c.psi_full || v->pr.swap >= v->c.swap_used;
-    if (v->pressured)
+    return v->pressured;
+}
+
+/*
+ * The heavy path: is the host out of room for one more heavy command?
+ * Memory first; only without pressure the slot scan, which reads other
+ * processes.
+ */
+static int no_room(const char *root, struct verdict *v)
+{
+    if (under_pressure(root, v))
         return 1;
     v->c.slots = limit(L_SLOTS, default_slots());
     scan_slots(root, &v->sl);
@@ -1094,23 +1129,77 @@ static int objection(const char *root, const char *command, struct verdict *v,
 }
 
 /*
+ * Stage 4 (k6): the events whose context gets the line. Both take
+ * hookSpecificOutput.additionalContext into the model's context (hooks
+ * docs): UserPromptSubmit next to the prompt, SessionStart before the first.
+ */
+static const char *const CONTEXT_EVENTS[] = {
+    "UserPromptSubmit", "SessionStart", NULL
+};
+
+/* The hook_event_name of a payload that may get the line, else NULL. */
+static const char *context_event(const cJSON *payload)
+{
+    const cJSON *name;
+
+    if (!cJSON_IsObject(payload))
+        return NULL;
+    name = cJSON_GetObjectItemCaseSensitive(payload, "hook_event_name");
+    return cJSON_IsString(name) && one_of(name->valuestring, CONTEXT_EVENTS)
+               ? name->valuestring
+               : NULL;
+}
+
+/*
+ * The context line into line; 0 unless memory is under pressure — the test
+ * the heavy path makes first, so the line shows exactly while pressure alone
+ * refuses heavy commands. Full slots alone add no line: the host is fine and
+ * a slot frees in a moment. No test run is suggested (see advice()). Facts,
+ * not orders: the hooks docs warn that text framed as system instructions
+ * can trip prompt-injection defenses.
+ */
+static int situation(const char *root, struct verdict *v, char *line,
+                     size_t size)
+{
+    v->pressured = v->scanned = 0;
+    v->off = throttle_off();
+    if (v->off || !under_pressure(root, v))
+        return 0;
+
+    line[0] = '\0';
+    add(line, size, "loadguard: ");
+    pressure_figures(line, size, &v->pr, &v->c);
+    add(line, size, ". Heavy commands refused until it eases: prove, make "
+        "test, builds, new claude -p/--bg. Light commands still run; see "
+        "`loadguard status`.");
+    return 1;
+}
+
+/*
  * The longest reason is about 850 bytes (3 holders of < 160, all figures at
- * 100 %, the longest advice): it never gets cut, and so never mid-character.
+ * 100 %, the longest advice), the context line 216 at most: neither ever
+ * gets cut, and so never mid-character.
  */
 #define REASON_MAX 1024
 
-/* The documented PreToolUse deny, on stdout; nothing if it cannot be built. */
-static void deny(const char *reason)
+/*
+ * {"hookSpecificOutput": {key: value, …}} on stdout from NULL-terminated
+ * key/value pairs, hookEventName first; nothing if it cannot be built. No
+ * other top-level key: Codex (k11) rejects unknown ones.
+ */
+static void respond(const char *const *kv)
 {
     cJSON *out = cJSON_CreateObject(), *hso = NULL;
     char *text = NULL;
 
     if (out != NULL &&
-        (hso = cJSON_AddObjectToObject(out, "hookSpecificOutput")) != NULL &&
-        cJSON_AddStringToObject(hso, "hookEventName", "PreToolUse") != NULL &&
-        cJSON_AddStringToObject(hso, "permissionDecision", "deny") != NULL &&
-        cJSON_AddStringToObject(hso, "permissionDecisionReason", reason) != NULL)
-        text = cJSON_PrintUnformatted(out);
+        (hso = cJSON_AddObjectToObject(out, "hookSpecificOutput")) != NULL) {
+        for (; kv[0] != NULL; kv += 2)
+            if (cJSON_AddStringToObject(hso, kv[0], kv[1]) == NULL)
+                break;
+        if (kv[0] == NULL)
+            text = cJSON_PrintUnformatted(out);
+    }
     if (text != NULL) {
         /* No newline: the form recorded working in k7. */
         fputs(text, stdout);
@@ -1119,18 +1208,37 @@ static void deny(const char *reason)
     cJSON_Delete(out);
 }
 
-/* Decide on one payload: deny on stdout, or nothing. */
+/*
+ * One payload: on UserPromptSubmit/SessionStart the context line or
+ * nothing; else, for Bash, the documented PreToolUse deny or nothing.
+ */
 static void hook(const char *root, const cJSON *payload)
 {
-    const cJSON *input = bash_tool_input(payload);
-    char reason[REASON_MAX];
+    const char *event = context_event(payload);
+    const cJSON *input;
+    char text[REASON_MAX];
     struct verdict v;
 
+    if (event != NULL) {
+        if (situation(root, &v, text, sizeof text)) {
+            const char *const kv[] = {
+                "hookEventName", event, "additionalContext", text, NULL
+            };
+            respond(kv);
+        }
+        return;
+    }
+    input = bash_tool_input(payload);
     if (input != NULL &&
         objection(root,
                   cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
-                  &v, reason, sizeof reason))
-        deny(reason);
+                  &v, text, sizeof text)) {
+        const char *const kv[] = {
+            "hookEventName", "PreToolUse", "permissionDecision", "deny",
+            "permissionDecisionReason", text, NULL
+        };
+        respond(kv);
+    }
 }
 
 /* ------------------------------------------------------------------------
@@ -1332,8 +1440,8 @@ int main(int argc, char **argv)
  *                  nothing
  *   measure ROOT   any payload: "full=%.2f swap=%d zram=%d" below ROOT
  *   slots ROOT     any payload: busy count, then one holder per line
- *   decide ROOT    exactly what the hook prints, with /proc and /sys below
- *                  ROOT
+ *   decide ROOT    any payload: exactly what the hook prints (deny, context
+ *                  line or nothing), with /proc and /sys below ROOT
  *   report ROOT    any payload: what --report prints, below ROOT
  *   explain ROOT   any payload: what --explain prints, below ROOT
  * Exit 1 if a Bash payload is needed and missing, 64 on usage.

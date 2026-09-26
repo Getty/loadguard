@@ -10,7 +10,9 @@ inside that session instead of dragging the whole machine into swap.
 When memory runs short, or too many heavy commands already run across all
 sessions, it refuses the next heavy one — a test suite, a build, a new
 headless `claude` — and tells the model why, with the numbers and a lighter
-alternative.
+alternative. While memory stays short, the model hears it with every prompt,
+before it tries; when the host is calm, loadguard adds nothing to the
+context.
 
 Linux only.
 
@@ -96,8 +98,13 @@ The refusal is the reason Claude Code hands to the model:
 
 ```
 loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0% (limit 10%), swap 60% used (limit 90%), zram 97% full.
-Wait for one to finish, then retry; light commands (git status, ls, cat) still run. Or run a single test file instead of the whole suite.
+Wait for one to finish, then retry; light commands (git status, ls, cat) still run. When you retry, run a single test file instead of the whole suite.
 ```
+
+A smaller run is advice for the retry, not a way around the wait: it is a
+heavy command too. Under memory pressure the reason suggests no test run at
+all, not even a single file — every run adds memory, and one `perl` was
+enough to take that machine down. It says to wait; light commands still run.
 
 The thresholds come from the 54 snapshots above: memory `full avg10` never
 exceeded 2.03 % in the calm ones and never fell below 45.47 % in the thrashing
@@ -105,6 +112,24 @@ ones; swap stayed at or below 68 % calm and reached 92–100 % thrashing. The
 hook costs about 0.5 ms for a light command and under 5 ms for a heavy one on
 that 4-core machine. Under memory pressure it does not look at other
 processes at all — reading them can itself stall on swap.
+
+### Telling the model before it tries
+
+While memory is under pressure — the same test as above: PSI memory
+`full avg10` at or above 10 %, or all swap at least 90 % used — every prompt
+and every session start carries one line for the model:
+
+```
+loadguard: memory pressure full=59.9% (limit 10%), swap 100% used (limit 90%). Heavy commands refused until it eases: prove, make test, builds, new claude -p/--bg. Light commands still run; see `loadguard status`.
+```
+
+Otherwise loadguard says nothing: no line, not a single token of context.
+Busy heavy slots alone do not add the line — the host is fine then, a slot
+frees up soon, and a refused command says so when it happens. The line is
+repeated on every prompt while the pressure lasts. It reaches the model as
+`additionalContext` of the `UserPromptSubmit` and `SessionStart` hooks, from
+the same C binary, which reads two kernel files for it and no process list
+(about 0.6 ms). `LOADGUARD_THROTTLE=0` turns it off along with the refusals.
 
 Things loadguard leaves alone on purpose:
 
@@ -125,6 +150,9 @@ Built:
   every heavy slot busy (above) and lets everything else through unchanged.
   Until the binary exists (still building, no compiler, build failed) the
   hook exits 0 and nothing is refused.
+- **The pressure line** (above) on `UserPromptSubmit` and `SessionStart`,
+  from the same binary: one line while memory is under pressure, nothing
+  otherwise.
 - **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`.
 
 Not built yet:
@@ -157,7 +185,8 @@ plugin does nothing.
 
 Environment variables, from the environment `claude` was started with. The
 confinement ones are read when a session starts, the refusal ones on every
-`Bash` call. Values are integers; a trailing `%` is accepted. An invalid or
+`Bash` call and, for the pressure line, on every prompt and session start.
+Values are integers; a trailing `%` is accepted. An invalid or
 out-of-range value falls back to the default.
 
 | Variable | Default | Sets |
@@ -170,7 +199,7 @@ out-of-range value falls back to the default.
 | `LOADGUARD_PSI_FULL` | `10` | refuse heavy commands at this memory PSI `full avg10`, 1–100 % |
 | `LOADGUARD_SWAP_USED` | `90` | … or at this much of all swap used, 1–100 % |
 | `LOADGUARD_HEAVY_SLOTS` | `nproc/2`, at least 1 | heavy commands allowed at once across all confined sessions |
-| `LOADGUARD_THROTTLE` | — | `0` turns refusing off |
+| `LOADGUARD_THROTTLE` | — | `0` turns refusing and the pressure line off |
 
 The limit is per session, and `claude` itself (about 300 MB) counts against
 it. To see where a session landed:
@@ -209,7 +238,7 @@ slots:   2/2 heavy busy
          make test in ~/dev/p5-foo
 verdict: deny; the model is told:
          loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0% (limit 10%), swap 60% used (limit 90%), zram 97% full.
-         Wait for one to finish, then retry; light commands (git status, ls, cat) still run. Or run a single test file instead of the whole suite.
+         Wait for one to finish, then retry; light commands (git status, ls, cat) still run. When you retry, run a single test file instead of the whole suite.
 ```
 
 The answers come from the hook binary itself, through two read-only report
@@ -238,7 +267,8 @@ Or from inside Claude Code: `/plugin marketplace add Getty/marketplace`, then
 - **Confinement only:** start `claude` with `LOADGUARD_CONFINE=0` in its
   environment. Only the exact value `0` switches it off; anything else keeps
   the default.
-- **Refusing only:** start `claude` with `LOADGUARD_THROTTLE=0`, same rule.
+- **Refusing and the pressure line:** start `claude` with
+  `LOADGUARD_THROTTLE=0`, same rule.
 - **The whole plugin:** `claude plugin disable loadguard@getty`, or
   `claude plugin uninstall loadguard@getty`.
 

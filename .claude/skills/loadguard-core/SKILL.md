@@ -24,9 +24,17 @@ wrong.
   `command`. It takes effect without `permissionDecision`. Permission rules are
   checked against the **rewritten** command (k3, live): a rewrite breaks the
   user's allow rules. k7's opposite reading came from `echo`, which is auto-approved.
-- The deny reason is shown to the model. It is loadguard's only voice: short,
-  numbers, one concrete alternative. Print the JSON without a trailing newline
-  (the form k7 recorded working).
+- The deny reason is shown to the model. With the context line (below) it is
+  loadguard's only voice: short, numbers, one concrete alternative. Print the
+  JSON without a trailing newline (the form k7 recorded working).
+- `UserPromptSubmit`/`SessionStart` (k6): same starter and binary, branching on
+  `hook_event_name`. Output `{"hookSpecificOutput": {"hookEventName": "<event>",
+  "additionalContext": "…"}}` — a system reminder next to the prompt / before
+  the first one. Plain stdout reaches the context too, but Codex (k11) rejects
+  unknown top-level keys: only `hookSpecificOutput`. Synchronous: async context
+  arrives a turn late and `-p` kills it. Exit 2 on UserPromptSubmit blocks and
+  erases the user's prompt — never. State facts, not orders: text framed as
+  system instructions can trip prompt-injection defenses (docs).
 - A timed-out hook does **not** block the command (docs, checked k4): a slow hook
   is a pass-through, so the deny path must be the fast one.
 - Field names drift between Claude Code versions. Before relying on one, confirm it
@@ -110,6 +118,20 @@ heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTT
   never inline code (`bash -c`, `perl -e`: that is Claude Code's wrapper). Count
   only the topmost heavy process of a chain in the slice. `claude -p`/`--bg`
   are heavy to start but hold no slot.
+- Advice: under memory pressure wait, light commands still run — **never a
+  test run**, not even one file, and never a command the classifier lets
+  through (`perl t/x.t`): that teaches the way around the guard, and one perl
+  took 3.8 GB. Full slots: a smaller run for the retry (it needs a slot too).
+
+## Context line (k6)
+
+`situation()`: context event **and** `under_pressure()` — the first half of
+`no_room()`, same limits, same comparison, never a copy — **and** not
+`LOADGUARD_THROTTLE=0` → one line (`pressure_figures()`, as in the deny reason,
+plus what is refused and what still runs); else not a byte. Full slots alone
+add no line, and the path never scans `/proc`. No test run suggested (see
+advice). No state across prompts. At most 216 characters
+(`test_line_stays_short`).
 
 ## CLI (k5)
 
@@ -128,7 +150,9 @@ Unit-test the decision function on recorded snapshots: turn files from
 `~/load-incidents/` into fixtures (PSI + meminfo + command → expected decision).
 The test driver (`-DLOADGUARD_TEST`) runs the real decision against a fixture
 root (`decide ROOT`, `slots ROOT`, `measure ROOT`, `report ROOT`, `explain ROOT`,
-`heavy`); running processes are JSON specs in `t/fixtures/procs/`. The
-production binary has no root override.
+`heavy`); running processes are JSON specs in `t/fixtures/procs/`, context
+event payloads (for `decide ROOT`) in `t/fixtures/events/`. The production
+binary has no root override; low `LOADGUARD_*` limits force its line on the
+live host without load.
 Never generate real memory pressure on reuben to test — it is the machine this
 plugin protects, and it has 8 GB.

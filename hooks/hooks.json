@@ -15,6 +15,24 @@
             "args": ["${CLAUDE_PLUGIN_DATA}"],
             "async": true,
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard",
+            "args": ["${CLAUDE_PLUGIN_DATA}"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard",
+            "args": ["${CLAUDE_PLUGIN_DATA}"],
+            "timeout": 5
           }
         ]
       }
