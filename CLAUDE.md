@@ -23,6 +23,7 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | Pfad | Inhalt |
 |---|---|
 | `.claude-plugin/plugin.json` | Plugin-Manifest |
+| `.codex-plugin/plugin.json` | Codex-Manifest, dieselbe `hooks/hooks.json`; gemeinsame Felder per Test gleich |
 | `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build + Lage-Zeile, UserPromptSubmit: Lage-Zeile, PreToolUse auf Bash) |
 | `hooks/loadguard` | sh-Starter für PreToolUse, UserPromptSubmit und SessionStart: `exec` des C-Binarys, ohne Binary `exit 0` |
 | `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits |

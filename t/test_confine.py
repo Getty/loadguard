@@ -157,52 +157,118 @@ class Base(unittest.TestCase):
         t.proc(2549701, 2549700, "node")
         return 2549533
 
+    def codex_session(self):
+        """tmux → bash → codex (TUI) → {hook, MCP server} (k11).
 
-class FindClaude(Base):
+        Codex runs a hook as `<shell> -c <command>`; bash execs a single
+        command, so the hook is codex's child (codex-rs
+        core/src/session/mod.rs:4666, hooks/src/engine/command_runner.rs).
+        """
+        t = self.t
+        t.proc(1357, 1, "tmux: server")
+        t.proc(2528747, 1357, "bash")
+        t.proc(2549500, 2528747, "codex", ["codex"])
+        t.proc(2549601, 2549500, "python3",
+               ["python3", "/x/hooks/loadguard-confine"])
+        t.proc(2549700, 2549500, "npm exec serper")
+        t.proc(2549701, 2549700, "node")
+        return 2549500
+
+
+class FindSession(Base):
     def test_parent_is_claude(self):
         claude = self.reuben_session()
         self.t.proc(2549602, claude, "python3")
-        self.assertEqual(confine.find_claude(self.t.root, claude),
+        self.assertEqual(confine.find_session(self.t.root, claude),
                          (claude, []))
 
     def test_shell_in_between(self):
         claude = self.reuben_session()
-        self.assertEqual(confine.find_claude(self.t.root, 2549600),
+        self.assertEqual(confine.find_session(self.t.root, 2549600),
                          (claude, [2549600]))
-        self.assertEqual(confine.find_claude(self.t.root, 2549601),
+        self.assertEqual(confine.find_session(self.t.root, 2549601),
                          (claude, [2549601, 2549600]))
 
     def test_argv0_when_comm_differs(self):
         # comm is the thread-ish name, argv[0] the installed binary.
         self.t.proc(500, 1, "MainThread", ["/opt/bin/claude", "-p"])
         self.t.proc(501, 500, "sh")
-        self.assertEqual(confine.find_claude(self.t.root, 501), (500, [501]))
+        self.assertEqual(confine.find_session(self.t.root, 501), (500, [501]))
 
     def test_not_fooled_by_lookalikes(self):
         # claude-code-history MCP server, a script mentioning claude.
         self.t.proc(600, 1, "node", ["node", "/x/.bin/claude-code-history"])
         self.t.proc(601, 600, "claude-wrapper", ["/usr/bin/claude-wrapper"])
         self.t.proc(602, 601, "sh")
-        self.assertEqual(confine.find_claude(self.t.root, 602), (None, []))
+        self.assertEqual(confine.find_session(self.t.root, 602), (None, []))
 
     def test_comm_with_spaces_and_parens(self):
         self.t.proc(700, 1, "claude")
         self.t.proc(701, 700, "a) (b")
-        self.assertEqual(confine.find_claude(self.t.root, 701), (700, [701]))
+        self.assertEqual(confine.find_session(self.t.root, 701), (700, [701]))
 
     def test_no_claude_up_to_init(self):
         self.t.proc(800, 1, "bash")
         self.t.proc(801, 800, "python3")
-        self.assertEqual(confine.find_claude(self.t.root, 801), (None, []))
+        self.assertEqual(confine.find_session(self.t.root, 801), (None, []))
 
     def test_depth_limit(self):
         self.t.proc(900, 1, "claude")
         for pid in range(901, 901 + confine.MAX_DEPTH):
             self.t.proc(pid, pid - 1, "sh")
-        self.assertEqual(confine.find_claude(self.t.root, 900 + confine.MAX_DEPTH),
+        self.assertEqual(confine.find_session(self.t.root, 900 + confine.MAX_DEPTH),
                          (None, []))
         self.assertEqual(
-            confine.find_claude(self.t.root, 899 + confine.MAX_DEPTH)[0], 900)
+            confine.find_session(self.t.root, 899 + confine.MAX_DEPTH)[0], 900)
+
+    def test_codex_parent(self):
+        codex = self.codex_session()
+        self.assertEqual(confine.find_session(self.t.root, codex),
+                         (codex, []))
+        self.assertEqual(confine.session_name(self.t.root, codex), "codex")
+
+    def test_codex_via_npm_launcher(self):
+        # npm's codex.js (node) spawns vendor/<triple>/bin/codex (codex-cli/
+        # bin/codex.js): the native binary is the session, not node.
+        self.t.proc(500, 1, "node", ["node", "/usr/lib/node_modules/@openai/"
+                                     "codex/bin/codex.js"])
+        self.t.proc(501, 500, "codex", [
+            "/usr/lib/node_modules/@openai/codex/vendor/"
+            "x86_64-unknown-linux-musl/bin/codex", "exec", "go"])
+        self.t.proc(502, 501, "sh")
+        self.assertEqual(confine.find_session(self.t.root, 502), (501, [502]))
+
+    def test_codex_argv0_when_comm_differs(self):
+        self.t.proc(500, 1, "tokio-runtime-w", ["/opt/codex/bin/codex"])
+        self.t.proc(501, 500, "sh")
+        self.assertEqual(confine.find_session(self.t.root, 501), (500, [501]))
+
+    def test_codex_helpers_are_no_session(self):
+        # The sandbox helper Codex starts for commands: argv[0]
+        # codex-linux-sandbox, comm cut to 15 bytes (codex-rs
+        # sandboxing/src/manager.rs:731, arg0/src/lib.rs:391-425).
+        self.t.proc(600, 1, "codex-linux-san", [
+            "/home/getty/.codex/tmp/arg0/codex-arg0Ab12Cd/"
+            "codex-linux-sandbox", "--sandbox-policy-cwd", "/w", "--",
+            "/bin/bash", "-c", "x"])
+        self.t.proc(601, 600, "codex-wrapper", ["/usr/bin/codex-wrapper"])
+        self.t.proc(602, 601, "sh")
+        self.assertEqual(confine.find_session(self.t.root, 602), (None, []))
+
+    def test_agent_inside_codex_sandbox(self):
+        # `claude -p` run by a Codex session: the nearest agent is the
+        # session, and it is already in the Codex scope (Confine below).
+        codex = self.codex_session()
+        self.t.proc(2550001, codex, "codex-linux-san",
+                    ["/t/codex-linux-sandbox", "--", "/bin/bash", "-c", "c"])
+        self.t.proc(2550002, 2550001, "5", ["bwrap", "--as-pid-1"])
+        self.t.proc(2550003, 2550002, "codex",
+                    ["codex-linux-sandbox", "--apply-seccomp-then-exec"])
+        self.t.proc(2550004, 2550003, "bash", ["/bin/bash", "-c", "c"])
+        self.t.proc(2550005, 2550004, "claude", ["claude", "-p", "x"])
+        self.t.proc(2550006, 2550005, "sh")
+        self.assertEqual(confine.find_session(self.t.root, 2550006),
+                         (2550005, [2550006]))
 
     def test_nearest_claude_wins(self):
         # claude -p started from a Bash command of another claude.
@@ -210,7 +276,7 @@ class FindClaude(Base):
         self.t.proc(3000, outer, "bash")
         self.t.proc(3001, 3000, "claude", ["claude", "-p", "x"])
         self.t.proc(3002, 3001, "python3")
-        self.assertEqual(confine.find_claude(self.t.root, 3002), (3001, [3002]))
+        self.assertEqual(confine.find_session(self.t.root, 3002), (3001, [3002]))
 
 
 class Descendants(Base):
@@ -388,6 +454,8 @@ class Confine(Base):
                          str(8025420 * 1024 * 40 // 100))
         self.assertEqual(start[start.index("Delegate") + 1:][:2],
                          ["b", "true"])
+        self.assertEqual(start[start.index("Description") + 2],
+                         "loadguard: claude session " + SESSION)
         # Then the MCP server tree; not the hook's own shell chain.
         self.assertEqual(attach[6:11], ["AttachProcessesToUnit", "ssau",
                                         self.NAME, "", "2"])
@@ -460,6 +528,54 @@ class Confine(Base):
         self.assertEqual(self.t.calls(), [])
         self.assertEqual(confine.cgroup(self.t.root, 3001), scope)
 
+    def test_codex_session(self):
+        # k11: the same scope, named and described after the Codex thread.
+        codex = self.codex_session()
+        thread = "01a0db6c-ea7b-77d0-bd5f-ce438459fa3a"
+        name = "loadguard-01a0db6c-%d.scope" % codex
+        self.assertEqual(self.t.confine(codex, session_id=thread), "attached")
+        start, attach = self.t.calls()
+        self.assertEqual(start[8], name)
+        self.assertEqual(self.pids(start), [codex])
+        self.assertEqual(start[start.index("Description") + 2],
+                         "loadguard: codex session " + thread)
+        self.assertEqual(sorted(self.pids(attach)), [2549700, 2549701])
+        self.assertEqual(confine.cgroup(self.t.root, codex),
+                         SLICE_PATH + "/" + name)
+        self.assertNotIn(name, confine.cgroup(self.t.root, 2549601))
+
+    def test_codex_app_server_hosts_many_threads(self):
+        # A shared `codex app-server --listen unix://` daemon (setsid, so
+        # init's child) runs the hooks of every thread it hosts (codex-rs
+        # app-server-daemon/src/backend/pid.rs:156-182, 413-421). The first
+        # thread's SessionStart confines it; the others find it confined and
+        # share that limit, as a nested `claude -p` does — never unconfined.
+        t = self.t
+        t.proc(3100, 1, "codex", ["/home/getty/.codex/packages/standalone/"
+                                  "current/codex", "app-server",
+                                  "--remote-control", "--listen", "unix://"])
+        t.proc(2549601, 3100, "python3", ["python3", "loadguard-confine"])
+        self.assertEqual(self.t.confine(3100, session_id="aaaa1111-x"),
+                         "attached")
+        first = confine.cgroup(t.root, 3100)
+        self.assertTrue(first.endswith("/loadguard-aaaa1111-3100.scope"))
+        for thread in ("bbbb2222-y", "cccc3333-z"):
+            self.assertEqual(self.t.confine(3100, session_id=thread),
+                             "already")
+        self.assertEqual(len(self.t.calls()), 1)
+        self.assertEqual(confine.cgroup(t.root, 3100), first)
+
+    def test_codex_inside_claude_stays_in_claude_scope(self):
+        # `codex exec` from a confined Claude Code session.
+        outer = self.reuben_session()
+        scope = SLICE_PATH + "/loadguard-091fbf8e-%d.scope" % outer
+        self.t.write("/proc/%d/cgroup" % outer, "0::%s\n" % scope)
+        self.t.proc(3000, outer, "bash", cgroup=scope)
+        self.t.proc(3001, 3000, "codex", ["codex", "exec", "x"], cgroup=scope)
+        self.t.proc(3002, 3001, "python3", cgroup=scope)
+        self.assertEqual(self.t.confine(3001, session_id="nested"), "already")
+        self.assertEqual(self.t.calls(), [])
+
     def test_start_failed_no_retry(self):
         self.reuben_session()
         os.environ["FAKE_FAIL"] = "0"
@@ -515,10 +631,10 @@ class FailOpen(Base):
         self.assertEqual(self.t.confine(start, env=env), status)
         self.assertEqual(self.t.calls(), [])
 
-    def test_no_claude(self):
+    def test_no_session(self):
         self.t.proc(50, 1, "bash")
         self.t.proc(51, 50, "python3")
-        self.assert_skips("no-claude", start=51)
+        self.assert_skips("no-session", start=51)
 
     def test_cgroup_v1(self):
         claude = self.reuben_session()
@@ -619,12 +735,12 @@ class Entry(unittest.TestCase):
         proc = self.run_entry(b'{"session_id": "abc"}', ["--status"])
         self.assertEqual(proc.returncode, 0)
         # Every answer here returns before busctl, so the real claude stays
-        # where it is: no claude above the runner, claude not yet confined
+        # where it is: no session above the runner, claude not yet confined
         # (stopped by the stripped XDG_RUNTIME_DIR), or claude already in a
         # loadguard scope, as every session since 0.1.1 is (k13). On other
         # hosts also no linger for the user, or no cgroup v2 at all.
         # A tried move answers attached, start-failed or unconfirmed.
-        self.assertIn(proc.stdout, (b"no-claude\n", b"no-bus\n",
+        self.assertIn(proc.stdout, (b"no-session\n", b"no-bus\n",
                                     b"already\n", b"no-linger\n",
                                     b"no-cgroup-v2\n"))
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# loadguard — SessionStart hook: confine the claude session (k3, stage 1).
+# loadguard — SessionStart hook: confine the session (k3, stage 1).
 #
-# Moves the claude process that runs this hook into a transient systemd user
-# scope with memory/CPU limits; see lib/loadguard/confine.py. Prints nothing
-# (zero context cost) and exits 0 whatever happens: the session always
-# starts, confined or not.
+# Moves the claude or codex process (k11) that runs this hook into a
+# transient systemd user scope with memory/CPU limits; see
+# lib/loadguard/confine.py. Prints nothing (zero context cost) and exits 0
+# whatever happens: the session always starts, confined or not.
 #
 #   loadguard-confine            as a hook: payload on stdin
 #   loadguard-confine --status   same, print the status word (for debugging)

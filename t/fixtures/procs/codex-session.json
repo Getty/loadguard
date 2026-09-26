@@ -1,0 +1,159 @@
+{
+ "comment": "A Codex TUI session (own scope, k11) runs `prove -lr t/` through its Linux sandbox: helper, bundled bwrap, the helper again inside the namespaces, bash, prove, a test child. Busy: 1.",
+ "processes": [
+  {
+   "pid": 7100,
+   "ppid": 7000,
+   "comm": "codex",
+   "argv": [
+    "codex"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7110,
+   "ppid": 7100,
+   "comm": "npm exec @upsta",
+   "argv": [
+    "npm exec @upstash/context7-mcp@latest",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7200,
+   "ppid": 7100,
+   "comm": "codex-linux-san",
+   "argv": [
+    "/home/getty/.codex/tmp/arg0/codex-arg0Qm3xZt/codex-linux-sandbox",
+    "--sandbox-policy-cwd",
+    "/home/getty/dev/simpici",
+    "--command-cwd",
+    "/home/getty/dev/simpici",
+    "--permission-profile",
+    "{\"type\":\"managed\",\"file_system\":{\"type\":\"restricted\",\"entries\":[]},\"network\":\"restricted\"}",
+    "--",
+    "/bin/bash",
+    "-c",
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7201,
+   "ppid": 7200,
+   "comm": "5",
+   "argv": [
+    "bwrap",
+    "--as-pid-1",
+    "--new-session",
+    "--die-with-parent",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--bind",
+    "/home/getty/dev/simpici",
+    "/home/getty/dev/simpici",
+    "--ro-bind",
+    "/home/getty/dev/simpici/.git",
+    "/home/getty/dev/simpici/.git",
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-net",
+    "--proc",
+    "/proc",
+    "--chdir",
+    "/home/getty/dev/simpici",
+    "--cap-drop",
+    "ALL",
+    "--argv0",
+    "codex-linux-sandbox",
+    "--",
+    "/home/getty/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/bin/codex",
+    "--sandbox-policy-cwd",
+    "/home/getty/dev/simpici",
+    "--command-cwd",
+    "/home/getty/dev/simpici",
+    "--permission-profile",
+    "{\"type\":\"managed\",\"file_system\":{\"type\":\"restricted\",\"entries\":[]},\"network\":\"restricted\"}",
+    "--apply-seccomp-then-exec",
+    "--",
+    "/bin/bash",
+    "-c",
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7202,
+   "ppid": 7201,
+   "comm": "codex",
+   "argv": [
+    "codex-linux-sandbox",
+    "--sandbox-policy-cwd",
+    "/home/getty/dev/simpici",
+    "--command-cwd",
+    "/home/getty/dev/simpici",
+    "--permission-profile",
+    "{\"type\":\"managed\",\"file_system\":{\"type\":\"restricted\",\"entries\":[]},\"network\":\"restricted\"}",
+    "--apply-seccomp-then-exec",
+    "--",
+    "/bin/bash",
+    "-c",
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7203,
+   "ppid": 7202,
+   "comm": "bash",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "prove -lr t/"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7204,
+   "ppid": 7203,
+   "comm": "prove",
+   "argv": [
+    "/usr/bin/perl",
+    "/usr/bin/prove",
+    "-lr",
+    "t/"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  },
+  {
+   "pid": 7205,
+   "ppid": 7204,
+   "comm": "perl",
+   "argv": [
+    "/usr/bin/perl",
+    "t/10-api.t"
+   ],
+   "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
+   "cwd": "/home/getty/dev/simpici"
+  }
+ ]
+}

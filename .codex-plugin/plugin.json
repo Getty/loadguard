@@ -1,0 +1,12 @@
+{
+  "name": "loadguard",
+  "version": "0.1.1",
+  "description": "Confines and throttles AI-issued shell commands by host pressure, and tells the model why — so it can back off instead of thrashing the box.",
+  "author": {
+    "name": "Torsten Raudssus",
+    "email": "getty@conflict.industries"
+  },
+  "homepage": "https://github.com/Getty/loadguard",
+  "license": "Artistic-2.0",
+  "hooks": "./hooks/hooks.json"
+}

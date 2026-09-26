@@ -14,7 +14,7 @@ alternative. While memory stays short, the model hears it with every prompt,
 before it tries; when the host is calm, loadguard adds nothing to the
 context.
 
-Linux only.
+Linux only. The same plugin runs under Codex; see [Codex](#codex).
 
 ## The problem this solves
 
@@ -45,8 +45,8 @@ only decide how strict to be.
 
 ## How it works
 
-On `SessionStart`, loadguard moves the `claude` process into a transient
-systemd user scope:
+On `SessionStart`, loadguard moves the `claude` process (or `codex`) into a
+transient systemd user scope:
 
 ```
 app-loadguard.slice/loadguard-<session>-<pid>.scope
@@ -88,11 +88,12 @@ without the hook reading a single file. A **heavy** command is refused when
 
 Heavy means the command runs `prove`, `make … test`, `dzil test|build|release`,
 `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
-`perlbench`, or starts `claude -p`/`--print`/`--bg`. It is recognised in
-command position — `cd x && FOO=1 nice prove -lr t/` is heavy,
-`git log --grep=prove` or a heredoc that mentions `make test` is not. A
-running command holds one slot however many processes it spawns; a nested
-`claude -p` holds none, but what it runs does.
+`perlbench`, or starts a headless agent session: `claude -p`/`--print`/`--bg`
+or `codex exec`. It is recognised in command position —
+`cd x && FOO=1 nice prove -lr t/` is heavy, `git log --grep=prove` or a
+heredoc that mentions `make test` is not. A running command holds one slot
+however many processes it spawns; a nested `claude -p` or `codex exec` holds
+none, but what it runs does.
 
 The refusal is the reason Claude Code hands to the model:
 
@@ -154,6 +155,9 @@ Built:
   from the same binary: one line while memory is under pressure, nothing
   otherwise.
 - **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`.
+- **Codex support** (below), built against the Codex 0.153.4 sources and
+  tested on reconstructed payloads; the first live run under Codex is still
+  ahead.
 
 Not built yet:
 
@@ -277,8 +281,48 @@ in its scope until it ends.
 
 ## Codex
 
-Not supported yet; whether and how loadguard can work under Codex is being
-looked into.
+The same plugin works under [Codex](https://github.com/openai/codex) (checked
+against the 0.153.4 sources): one `hooks/hooks.json` serves both, and Codex
+fires the same three events. Each Codex session is confined like a Claude
+Code session — the `codex` process goes into its own scope — and the shell
+commands the model runs are refused under the same rules, with the same
+reason, whether they come from Claude Code or from Codex. A `codex exec` is
+heavy like `claude -p`. Codex's own sandbox (`codex-linux-sandbox` and
+`bwrap`) stays inside the scope and does not change how commands are
+counted.
+
+**The Codex marketplace entry is not published yet.** Once it is:
+
+```sh
+codex plugin marketplace add Getty/marketplace
+codex plugin add loadguard@getty
+```
+
+Codex asks you to trust a plugin's hooks before it runs them — each of the
+five, and again whenever `hooks/hooks.json` changes. Until you do, loadguard
+is installed but silent: nothing is confined, nothing refused, no error.
+Non-interactive runs (`codex exec`) cannot grant that trust; start `codex`
+once and accept the prompt. To update, run `codex plugin add loadguard@getty`
+again; to remove it, `codex plugin remove loadguard@getty`. The environment
+variables under [Configuration](#configuration) apply unchanged, read from
+the environment `codex` was started with.
+
+Differences from Claude Code:
+
+- **One scope per Codex process.** `codex` and `codex exec` run one session
+  per process. A shared app-server — the local daemon behind
+  `codex remote-control`, which a new `codex` connects to when it is running,
+  or the `codex app-server` behind the VS Code extension — hosts many
+  sessions in one process. The first of them confines it; the others share
+  that scope and its limit, as a nested `claude -p` shares its parent's.
+- **The CLI is not on the model's `PATH`.** Codex does not add a plugin's
+  `bin/` to its shell. Run it by its full path from a terminal:
+  `~/.codex/plugins/cache/getty/loadguard/<version>/bin/loadguard status`.
+  Inside Codex's sandbox `/proc` shows only the sandbox's own processes, so
+  `status` there would miss the heavy commands of other sessions.
+- A refused command reaches the model as
+  `Command blocked by PreToolUse hook: <reason>. Command: <command>` —
+  Codex's wrapping around the same reason.
 
 ## Develop
 

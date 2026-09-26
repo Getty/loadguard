@@ -14,9 +14,10 @@
  * Heavy: a simple command of the Bash string — at its start, after ; & | ( )
  * ` or a newline, past VAR=x assignments and prefixes like nice, timeout or
  * env — runs prove, dzil test|build|release, make … test, cpanm,
- * docker|podman build|run, cargo build|test, npm test, perlbench or
- * claude -p|--print|--bg. Quotes, comments and heredoc bodies are not
- * commands. Everything else is light and costs no read beyond stdin.
+ * docker|podman build|run, cargo build|test, npm test, perlbench,
+ * claude -p|--print|--bg or codex exec|e. Quotes, comments and heredoc
+ * bodies are not commands. Everything else is light and costs no read beyond
+ * stdin.
  *
  * No room (docs/design.md, Stufe 2/3, "Umgesetzt (k4)"):
  *  1. memory PSI full avg10 >= LOADGUARD_PSI_FULL (10 %) or total swap used
@@ -29,7 +30,9 @@
  *     running command is one slot: processes are judged by their argv, not
  *     by the text of the Bash wrapper around them, and only the topmost
  *     heavy process of a chain counts (prove's perl children, a recursive
- *     make). claude -p/--bg sessions hold no slot; what they run does.
+ *     make). claude -p/--bg and codex exec sessions hold no slot; what they
+ *     run does. Codex's sandbox helpers (codex-linux-sandbox, bwrap) are
+ *     no heavy process and hide none (k11).
  * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through, and no
  * context line — nothing is refused, so there is nothing to warn about.
  *
@@ -216,7 +219,8 @@ enum kind {
     K_PROVE,        /* prove */
     K_SUITE,        /* a whole test suite: make test, dzil test|release, … */
     K_BUILD,        /* builds, installs, containers, perlbench */
-    K_CLAUDE        /* claude -p|--print|--bg: heavy to start, holds no slot */
+    K_AGENT         /* claude -p|--print|--bg, codex exec|e: a new headless
+                       agent session, heavy to start, holds no slot */
 };
 
 struct match {
@@ -228,6 +232,14 @@ struct match {
 static const char *const INTERPRETERS[] = {
     "perl", "python", "python3", "node", "sh", "bash", "dash", NULL
 };
+
+/*
+ * Arguments that make an agent CLI start a headless session, anywhere after
+ * the command word: Codex takes global options before the subcommand
+ * (`codex -m o3 exec …`); `e` is exec's alias (`codex --help`, 0.153.4).
+ */
+static const char *const CLAUDE_HEADLESS[] = {"-p", "--print", "--bg", NULL};
+static const char *const CODEX_HEADLESS[] = {"exec", "e", NULL};
 
 static const char *base(const char *s)
 {
@@ -309,11 +321,12 @@ static enum kind classify(char *const *av, int ac, struct match *m)
     } else if (strcmp(name, "npm") == 0) {
         if (strcmp(sub, "test") == 0)
             kind = K_SUITE;
-    } else if (strcmp(name, "claude") == 0) {
+    } else if (strcmp(name, "claude") == 0 || strcmp(name, "codex") == 0) {
+        const char *const *headless =
+            strcmp(name, "claude") == 0 ? CLAUDE_HEADLESS : CODEX_HEADLESS;
         for (i = 1; i < ac && kind == K_NONE; i++)
-            if (strcmp(av[i], "-p") == 0 || strcmp(av[i], "--print") == 0 ||
-                strcmp(av[i], "--bg") == 0) {
-                kind = K_CLAUDE;
+            if (one_of(av[i], headless)) {
+                kind = K_AGENT;
                 sub = av[i];
             }
     }
@@ -824,7 +837,7 @@ static const struct proc *find(const struct proc *ps, size_t n, int pid)
 
 static int holds_slot(enum kind k)
 {
-    return k != K_NONE && k != K_CLAUDE;
+    return k != K_NONE && k != K_AGENT;
 }
 
 /* Is a slot-holding process above p, within the slice? */
@@ -1043,9 +1056,9 @@ static void advice(char *r, size_t size, const struct match *m, int slots)
             add(r, size, " When you retry, run a single test file instead "
                 "of the whole suite.");
         break;
-    case K_CLAUDE:
-        add(r, size, " Do not start new `claude -p`/`claude --bg` sessions "
-            "now; do the work in this one.");
+    case K_AGENT:
+        add(r, size, " Do not start new `claude -p`/`claude --bg` or "
+            "`codex exec` sessions now; do the work in this one.");
         break;
     default:
         break;
@@ -1176,7 +1189,7 @@ static int situation(const char *root, struct verdict *v, char *line,
 }
 
 /*
- * The longest reason is about 850 bytes (3 holders of < 160, all figures at
+ * The longest reason is about 870 bytes (3 holders of < 160, all figures at
  * 100 %, the longest advice), the context line 216 at most: neither ever
  * gets cut, and so never mid-character.
  */

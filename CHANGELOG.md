@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Codex support (k11), built against the Codex 0.153.4 sources; the first
+  live run under Codex is still ahead, and the Codex marketplace entry is
+  not published yet. A new `.codex-plugin/plugin.json` points Codex at the
+  same `hooks/hooks.json` (a test keeps its shared fields, the version
+  first, equal to `.claude-plugin/plugin.json`'s). Codex fires the same
+  three events and takes the same answers: the tests feed the hook binary
+  payloads built from Codex's own structs and require the Claude Code
+  bytes back, deny and context line alike, and run every `hooks.json`
+  entry the way Codex does — without `args`, from `$CLAUDE_PLUGIN_DATA`
+  alone. A Codex session is confined like a Claude Code one: the session
+  process is now the nearest `claude` **or `codex`** above the hook, the
+  unit's description names which (`loadguard: codex session <id>`), and a
+  shared `codex app-server` daemon, which hosts many sessions in one
+  process, is confined once and shares that scope with all of them —
+  never left out. `codex exec` (and `codex e`) is heavy like `claude -p`:
+  refused under pressure or with full slots, holding no slot while it
+  runs, and the advice for both now reads ``Do not start new `claude
+  -p`/`claude --bg` or `codex exec` sessions now``. Codex's sandbox chain
+  (`codex-linux-sandbox`, `bwrap`, the helper again inside the
+  namespaces) counts as light and hides nothing: a `prove` inside it is
+  one slot. Wording is harness-neutral where it named claude alone:
+  `loadguard status`/`doctor` say "not run from a Claude Code or Codex
+  session", the confine hook's status word is `no-session`. Under Codex
+  the CLI is not on the model's `PATH` (Codex adds no plugin `bin/`); it
+  finds the binary from its install path under `~/.codex/plugins` as it
+  does under `~/.claude/plugins`.
 - Under memory pressure the model now hears it before it tries (k6): on
   `UserPromptSubmit` and `SessionStart` the hook binary adds one line of
   context, as `hookSpecificOutput.additionalContext` —

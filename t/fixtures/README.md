@@ -40,6 +40,25 @@ tests replace fields to build broken and foreign variants.
 | `user-prompt-submit.json` | `UserPromptSubmit`, with `prompt` |
 | `session-start.json` | `SessionStart`, `source: "startup"`, `model` |
 
+## `codex/` — reconstructed, Codex payloads (k11)
+
+Built field by field from the payload structs of codex-rs `rust-v0.153.4`
+(= `codex-cli 0.153.4` on reuben), `hooks/src/schema.rs`, in their
+serialization order; no recorded counterpart yet (the live test needs
+Getty's hook trust). Values: UUIDv7 ids and a rollout path in the shape of
+`~/.codex/sessions/…`, the model slug of reuben's config.
+
+| File | Struct | Case |
+|---|---|---|
+| `pre-tool-use.json` | `PreToolUseCommandInput` (278-296) | the shell tool: `tool_name` `Bash`, `tool_input` `{"command": …}` only (`core/src/tools/handlers/unified_exec/exec_command.rs:504-515`) |
+| `pre-tool-use-subagent.json` | same | a spawned subagent thread: `agent_id` (its thread id), `agent_type` `default` (`core/src/hook_runtime.rs:1025-1031`), `transcript_path` `null`, `bypassPermissions` (approval `never`) |
+| `user-prompt-submit.json` | `UserPromptSubmitCommandInput` (567-583) | with `turn_id`, the Codex extension |
+| `session-start.json` | `SessionStartCommandInput` (499-510) | `source: "startup"`; Codex fires it at the first turn (`core/src/session/turn.rs:264`) |
+
+The hook reads the same fields as in Claude Code's (`hook_event_name`,
+`tool_name`, `tool_input.command`, `session_id` for confine); the tests
+swap the command.
+
 ## `updated-input/` — recorded, pins `updatedInput` semantics
 
 Same session. Per probe: `.pre.json` (PreToolUse payload), `.hook-out.json` (what
@@ -105,5 +124,30 @@ to record these.
 | `claude-p.json` | A started a nested `claude -p` and a `claude --bg`, both idle, same scope | 0 |
 | `claude-p-prove.json` | the `claude -p` above runs `prove -l t/foo.t` (needs `claude-p`) | 1 |
 | `npm-title.json` | B runs `npm test` (title `npm test`), which runs `sh -c 'prove -lr t'` | 1 |
+| `codex-exec.json` | A started `codex exec`, idle, in A's scope (k11) | 0 |
+| `codex-session.json` | a Codex TUI session in its own scope runs `prove -lr t/` through its Linux sandbox (k11, below) | 1 |
 
-PIDs are disjoint across specs, so tests combine them (all six: 4 slots).
+PIDs are disjoint across specs, so tests combine them (all eight: 5 slots).
+
+### The Codex chain (`codex-session.json`)
+
+Reconstructed from the codex-rs `rust-v0.153.4` sources for reuben's setup
+(`sandbox_mode = "workspace-write"`, no system `bwrap`, so the bundled
+`codex-resources/bwrap`); no Codex command was run to record it.
+
+| PID | comm | argv | Source |
+|---|---|---|---|
+| 7100 | `codex` | `codex` — the TUI, hosting the thread in-process | `tui/src/lib.rs:255-282` |
+| 7200 | `codex-linux-san` | `~/.codex/tmp/arg0/codex-arg0XXXXXX/codex-linux-sandbox --sandbox-policy-cwd … --command-cwd … --permission-profile <json> -- /bin/bash -c <script>` | `sandboxing/src/manager.rs:414-443, 731-737`, `sandboxing/src/landlock.rs:23-58`, `arg0/src/lib.rs:355-425` (a symlink to codex; comm is cut to 15 bytes) |
+| 7201 | `5` | `bwrap --as-pid-1 --new-session --die-with-parent <mounts> --unshare-user --unshare-pid --unshare-ipc --unshare-net --proc /proc --chdir … --cap-drop ALL --argv0 codex-linux-sandbox -- <codex> … --apply-seccomp-then-exec -- /bin/bash -c <script>` | `linux-sandbox/src/linux_run_main.rs:393-469, 475-506, 555-615`, `bwrap.rs:308-357`, `launcher.rs:38-57`; the bundled bwrap is exec'd through `/proc/self/fd/N` (`bundled_bwrap.rs:36-72`), so comm is that number |
+| 7202 | `codex` | `codex-linux-sandbox … --apply-seccomp-then-exec -- /bin/bash -c <script>` — PID 1 of the new namespaces, forks the command and waits | `linux_run_main.rs:192-259, 1511-1550` |
+| 7203 | `bash` | `/bin/bash -c 'prove -lr t/'` | `core/src/shell.rs:22-31`; with the shell snapshot (default) Codex runs `bash -c ". <snapshot>; exec '/bin/bash' -c '<cmd>'"`, the exec leaves this argv (`core/src/tools/runtimes/mod.rs:225-302`) |
+| 7204, 7205 | `prove`, `perl` | as in `prove-chain.json` | |
+
+Simplified: the mounts, and the permission profile JSON (no entries);
+`<script>` without the PATH exports Codex puts around the `exec`. Without
+paths to protect that do not exist yet, the outer helper execs bwrap
+instead of forking it: 7200 and 7201 are then one process. None of this is
+read by the classifier, which judges argv[0] (and an interpreter's script)
+only. `/bin/bash -lc` — before the snapshot exists — is covered by
+`test_codex_login_shell`.

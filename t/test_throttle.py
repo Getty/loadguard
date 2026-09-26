@@ -31,6 +31,7 @@ CALM = os.path.join(FIXTURES, "proc", "reuben-recorded-20260926")
 THRASH = os.path.join(FIXTURES, "proc", "thrash-20260917-175030-reconstructed")
 PROCS = os.path.join(FIXTURES, "procs")
 EVENTS = os.path.join(FIXTURES, "events")
+CODEX = os.path.join(FIXTURES, "codex")
 INCIDENTS = os.path.join(FIXTURES, "incidents")
 LIVE_INCIDENTS = os.path.expanduser("~/load-incidents")
 
@@ -78,6 +79,16 @@ def event_payload(event, **fields):
     """A context event's payload (t/fixtures/events/), fields replaced."""
     with open(os.path.join(EVENTS, EVENT_FIXTURES[event]), "rb") as f:
         doc = json.load(f)
+    doc.update(fields)
+    return json.dumps(doc).encode("utf-8")
+
+
+def codex_payload(name, command=None, **fields):
+    """A Codex payload (t/fixtures/codex/), the command or fields replaced."""
+    with open(os.path.join(CODEX, name), "rb") as f:
+        doc = json.load(f)
+    if command is not None:
+        doc["tool_input"]["command"] = command
     doc.update(fields)
     return json.dumps(doc).encode("utf-8")
 
@@ -244,6 +255,11 @@ HEAVY = {
     "claude -p 'fix the tests'": "claude -p",
     "claude --print hi": "claude --print",
     "claude --bg 'refactor'": "claude --bg",
+    "codex exec 'fix the tests'": "codex exec",
+    "codex e 'fix the tests'": "codex e",
+    "codex -m gpt-6-astra exec --full-auto 'go'": "codex exec",
+    "cd x && echo go | codex exec -": "codex exec",
+    "~/.local/bin/codex exec resume --last": "codex exec",
     "cat > x.sh <<-EOF\n\tprove\n\tEOF\nmake test": "make test",
     "cat <<A <<B\nprove\nA\nprove\nB\ncpanm X": "cpanm",
     "echo hi \\\n; prove": "prove",
@@ -264,6 +280,9 @@ LIGHT = [
     "make", "make install", "make -C lib", "dzil listdeps", "dzil authordeps",
     "docker ps", "podman images", "podman logs x", "cargo check",
     "npm install", "npm run lint", "claude --version", "claude mcp list",
+    "codex", "codex --version", "codex login", "codex resume --last",
+    "codex plugin list", "codex mcp list", "git log --grep='codex exec'",
+    "codex-linux-sandbox --sandbox-policy-cwd /w -- /bin/bash -c prove",
     "perl -Ilib t/foo.t", "perl -e 'print 1'", "bash ./run.sh",
     "bash -c 'prove -lr t'",     # inline code is not looked into
     "sudo prove", "echo x > prove", "cat < prove", "cat <<< prove",
@@ -402,6 +421,40 @@ class Slots(Tree):
                                  "prove -l t/foo.t in ~/dev/sunriser",
                                  "make test in ~/dev/p5-foo"])
 
+    def test_codex_sandbox_chain_is_one_slot(self):
+        # k11: codex → codex-linux-sandbox → bwrap → the helper again inside
+        # the namespaces → bash → prove → perl. The helpers judge as light
+        # and hide nothing; the command inside them is one slot.
+        root = self.tree(CALM, ["idle-sessions", "codex-session"])
+        self.assertEqual(self.slots(root),
+                         (1, ["prove -lr t/ in ~/dev/simpici"]))
+
+    def test_codex_helpers_alone_hold_nothing(self):
+        # Their argv carries the command after `--`; only argv[0] counts.
+        root = self.tree(CALM, ["codex-session"])
+        for pid in ("7204", "7205"):
+            shutil.rmtree(os.path.join(root, "proc", pid))
+        self.assertEqual(self.slots(root), (0, []))
+
+    def test_codex_login_shell(self):
+        # Before the shell snapshot exists Codex runs `bash -lc <cmd>`
+        # (codex-rs core/src/shell.rs:22-31, tools/runtimes/mod.rs:225-302
+        # turns it into `bash -c` afterwards): still the one prove.
+        root = self.tree(CALM, ["codex-session"])
+        with open(os.path.join(root, "proc", "7203", "cmdline"), "wb") as f:
+            f.write(b"/bin/bash\0-lc\0prove -lr t/\0")
+        self.assertEqual(self.slots(root),
+                         (1, ["prove -lr t/ in ~/dev/simpici"]))
+
+    def test_codex_exec_holds_no_slot(self):
+        root = self.tree(CALM, ["idle-sessions", "codex-exec"])
+        self.assertEqual(self.slots(root), (0, []))
+
+    def test_every_spec_at_once(self):
+        root = self.tree(CALM, sorted(
+            n[:-5] for n in os.listdir(PROCS) if n.endswith(".json")))
+        self.assertEqual(self.slots(root)[0], 5)
+
     def test_inline_code_is_no_script(self):
         # A shell or perl running inline code holds no slot itself, even if
         # the code's last path component is a heavy name — e.g. a wrapper
@@ -535,6 +588,8 @@ class Decide(Tree):
                 "claude -p 'go'": ("(claude -p)",
                                    "Do not start new `claude -p`"),
                 "podman build .": ("(podman build)", "Wait and retry later"),
+                "codex exec 'go'": ("(codex exec)",
+                                    "`codex exec` sessions now"),
         }.items():
             with self.subTest(command=command):
                 reason = self.reason(root, command)
@@ -588,6 +643,33 @@ class Decide(Tree):
         reason = self.reason(root, "cpanm Foo", LOADGUARD_HEAVY_SLOTS="4")
         self.assertIn("4/4 heavy slots busy (", reason)
         self.assertIn("make test in ~/dev/p5-foo; +1 more)", reason)
+
+    def test_agent_advice_names_both(self):
+        # claude -p/--bg and codex exec are one kind (k11): new headless
+        # sessions, refused alike, with the same advice.
+        advice = (" Do not start new `claude -p`/`claude --bg` or `codex "
+                  "exec` sessions now; do the work in this one.")
+        thrash = self.tree(THRASH)
+        busy = self.tree(CALM, ["idle-sessions", "prove-chain"])
+        for command, label in (("claude -p 'go'", "claude -p"),
+                               ("claude --bg 'go'", "claude --bg"),
+                               ("codex exec 'go'", "codex exec"),
+                               ("codex e 'go'", "codex e")):
+            with self.subTest(command=command):
+                for root, env in ((thrash, {}),
+                                  (busy, {"LOADGUARD_HEAVY_SLOTS": "1"})):
+                    reason = self.reason(root, command, **env)
+                    self.assertIn("refused (%s): " % label, reason)
+                    self.assertTrue(reason.endswith(advice), reason)
+
+    def test_codex_exec_running_leaves_the_slot_free(self):
+        root = self.tree(CALM, ["idle-sessions", "codex-exec"])
+        self.assert_allowed(root, "prove -lr t/", LOADGUARD_HEAVY_SLOTS="1")
+
+    def test_codex_session_prove_holds_a_slot(self):
+        root = self.tree(CALM, ["idle-sessions", "codex-session"])
+        self.assertIn("1/1 heavy slots busy (prove -lr t/ in ~/dev/simpici)",
+                      self.reason(root, "make test", LOADGUARD_HEAVY_SLOTS="1"))
 
     def test_claude_p_running_leaves_the_slot_free(self):
         root = self.tree(CALM, ["idle-sessions", "claude-p"])
@@ -1083,6 +1165,72 @@ class Context(Tree):
         self.assertEqual(seen, {True, False})
 
 
+# --- Codex (k11): the same answers to Codex's payloads ----------------------
+
+class CodexPayloads(Tree):
+    """t/fixtures/codex/: payloads as Codex 0.153.4 builds them (codex-rs
+    hooks/src/schema.rs). The shell tool reaches PreToolUse as tool_name
+    "Bash" with tool_input {"command": …} alone
+    (core/src/tools/handlers/unified_exec/exec_command.rs:504-515). The hook
+    reads the same three fields as in Claude Code's, so the output must be
+    the same bytes."""
+
+    ROOTS = {"calm": (CALM, ["idle-sessions"]),
+             "thrash": (THRASH, ["idle-sessions", "codex-session"]),
+             "busy": (CALM, ["idle-sessions", "prove-chain", "codex-session",
+                             "codex-exec"])}
+    ENVS = ({}, {"LOADGUARD_HEAVY_SLOTS": "1"}, {"LOADGUARD_THROTTLE": "0"})
+
+    def out(self, root, stdin, **env):
+        proc = self.driver("decide", root, stdin, **env)
+        self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        return proc.stdout
+
+    def test_pre_tool_use_is_claude_codes(self):
+        commands = list(HEAVY)[:12] + ["codex exec 'go'", "git status",
+                                       "cat prove.txt", "codex --version"]
+        seen = set()
+        for name, (pressure, scenarios) in self.ROOTS.items():
+            root = self.tree(pressure, scenarios)
+            for env in self.ENVS:
+                for command in commands:
+                    with self.subTest(root=name, env=env, command=command):
+                        want = self.out(root, payload(command), **env)
+                        for fixture in ("pre-tool-use.json",
+                                        "pre-tool-use-subagent.json"):
+                            self.assertEqual(self.out(root, codex_payload(
+                                fixture, command), **env), want)
+                        seen.add(b"deny" in want)
+        self.assertEqual(seen, {True, False})
+
+    def test_codex_deny_is_the_documented_form(self):
+        # Codex parses it with deny_unknown_fields (schema.rs:127-140,
+        # 241-255) and hands the model "Command blocked by PreToolUse hook:
+        # {reason}. Command: {command}" (core/src/hook_runtime.rs:229-234).
+        out = self.out(self.tree(THRASH),
+                       codex_payload("pre-tool-use.json", "prove -lr t/"))
+        doc = json.loads(out)
+        self.assertEqual(list(doc), ["hookSpecificOutput"])
+        self.assertEqual(sorted(doc["hookSpecificOutput"]), [
+            "hookEventName", "permissionDecision",
+            "permissionDecisionReason"])
+        self.assertEqual(doc["hookSpecificOutput"]["permissionDecision"],
+                         "deny")
+
+    def test_context_line_is_claude_codes(self):
+        for event, fixture in (("UserPromptSubmit", "user-prompt-submit.json"),
+                               ("SessionStart", "session-start.json")):
+            for name, (pressure, scenarios) in self.ROOTS.items():
+                root = self.tree(pressure, scenarios)
+                for env in self.ENVS:
+                    with self.subTest(event=event, root=name, env=env):
+                        self.assertEqual(
+                            self.out(root, codex_payload(fixture), **env),
+                            self.out(root, event_payload(event), **env))
+            self.assertIn(json.dumps(THRASH_LINE).encode(), self.out(
+                self.tree(THRASH), codex_payload(fixture)))
+
+
 # --- calibration against the incident snapshots ---------------------------
 
 def incident_files():
@@ -1233,6 +1381,8 @@ class LiveHost(unittest.TestCase):
         starter = os.path.join(ROOT, "hooks", "loadguard")
         good = event_payload("UserPromptSubmit")
         cases = [(e, event_payload(e)) for e in CONTEXT_EVENTS] + [
+            ("UserPromptSubmit", codex_payload("user-prompt-submit.json")),
+            ("SessionStart", codex_payload("session-start.json"))] + [
             ("UserPromptSubmit", stdin) for stdin in (
                 b"", b"{", good[:-1], b"\xff" + good, b"[" * 5000 + b"]" * 5000,
                 event_payload("UserPromptSubmit", hook_event_name=5),

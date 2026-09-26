@@ -1,0 +1,14 @@
+{
+  "session_id": "019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9",
+  "turn_id": "019a7c3f-0b12-7c55-8e41-6fd09a3c2e17",
+  "transcript_path": "/home/getty/.codex/sessions/2026/09/26/rollout-2026-09-26T08-14-02-019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.jsonl",
+  "cwd": "/home/getty/dev/simpici",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-6-astra",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git status"
+  },
+  "tool_use_id": "call_Wq3Lx9Tb2mN8vRk4Pz7Yd1Hs"
+}

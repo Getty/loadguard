@@ -8,14 +8,17 @@ tested in test_hook_binary.py, its build in test_build.py.
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hooks", "loadguard")
 FIXTURES = os.path.join(ROOT, "t", "fixtures")
 EVENTS = os.path.join(FIXTURES, "events")
+CODEX = os.path.join(FIXTURES, "codex")
 
 # Wall-clock per run; only catches hangs. Far below the 5 s hook timeout.
 BUDGET_S = 1.0
@@ -67,6 +70,15 @@ class StarterWithoutBinary(unittest.TestCase):
         for name in sorted(os.listdir(EVENTS)):
             with self.subTest(fixture=name):
                 with open(os.path.join(EVENTS, name), "rb") as f:
+                    proc = run_starter([self.data], f.read())
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                                 (0, b"", b""))
+
+    def test_codex_payloads_pass_through_silently(self):
+        # k11: no binary, no decision and no context under Codex either.
+        for name in sorted(os.listdir(CODEX)):
+            with self.subTest(fixture=name):
+                with open(os.path.join(CODEX, name), "rb") as f:
                     proc = run_starter([self.data], f.read())
                 self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
                                  (0, b"", b""))
@@ -158,6 +170,39 @@ class PayloadFields(unittest.TestCase):
                 self.assertNotIn("tool_name", p)
                 self.assertIsInstance(p["session_id"], str)
 
+    def test_codex_fixtures(self):
+        # Reconstructed from codex-rs 0.153.4 hooks/src/schema.rs, fields in
+        # serialization order: PreToolUseCommandInput (278-296; agent_id and
+        # agent_type only in a spawned subagent), UserPromptSubmitCommandInput
+        # (567-583), SessionStartCommandInput (499-510). The shell tool's
+        # tool_input is {"command": …} alone (exec_command.rs:504-515).
+        tool = ["session_id", "turn_id", "transcript_path", "cwd",
+                "hook_event_name", "model", "permission_mode", "tool_name",
+                "tool_input", "tool_use_id"]
+        for name, keys, event in (
+                ("pre-tool-use.json", tool, "PreToolUse"),
+                ("pre-tool-use-subagent.json",
+                 tool[:2] + ["agent_id", "agent_type"] + tool[2:],
+                 "PreToolUse"),
+                ("user-prompt-submit.json",
+                 ["session_id", "turn_id", "transcript_path", "cwd",
+                  "hook_event_name", "model", "permission_mode", "prompt"],
+                 "UserPromptSubmit"),
+                ("session-start.json",
+                 ["session_id", "transcript_path", "cwd", "hook_event_name",
+                  "model", "permission_mode", "source"], "SessionStart")):
+            with self.subTest(fixture=name):
+                with open(os.path.join(CODEX, name), "rb") as f:
+                    p = json.load(f)
+                self.assertEqual(list(p), keys)
+                self.assertEqual(p["hook_event_name"], event)
+                if event == "PreToolUse":
+                    self.assertEqual(p["tool_name"], "Bash")
+                    self.assertEqual(list(p["tool_input"]), ["command"])
+        self.assertEqual(sorted(os.listdir(CODEX)), [
+            "pre-tool-use-subagent.json", "pre-tool-use.json",
+            "session-start.json", "user-prompt-submit.json"])
+
     def test_recorded_tool_input_holds_only_what_the_model_set(self):
         # Recorded (k7): no defaults are filled in — description, timeout and
         # run_in_background are present only if the model passed them.
@@ -179,6 +224,47 @@ class PluginWiring(unittest.TestCase):
             manifest = json.load(f)
         self.assertEqual(manifest["name"], "loadguard")
         self.assertIn("version", manifest)
+
+    def test_codex_manifest_matches(self):
+        # k11: one release, two manifests. Every field of Claude Code's has
+        # the same value in Codex's, so a version bump in one alone fails
+        # here. Codex's adds `hooks` only (like ~/dev/briefing's; codex-rs
+        # core-plugins/src/manifest.rs RawPluginManifest), and no skills:
+        # loadguard ships none.
+        manifests = {}
+        for harness in ("claude", "codex"):
+            with open(os.path.join(ROOT, ".%s-plugin" % harness,
+                                   "plugin.json")) as f:
+                manifests[harness] = json.load(f)
+        claude, codex = manifests["claude"], manifests["codex"]
+        self.assertEqual({k: codex.get(k) for k in claude}, claude)
+        self.assertEqual(sorted(set(codex) - set(claude)), ["hooks"])
+        self.assertEqual(codex["hooks"], "./hooks/hooks.json")
+
+    def test_hooks_json_reads_under_codex(self):
+        # Codex parses the same file (config/src/hook_config.rs): the top
+        # level denies unknown fields (HooksFile, 10-17), events are its
+        # names (36-61), a handler knows type/command/timeout/async/
+        # statusMessage/additionalContextLimit and ignores the rest —
+        # Claude Code's exec-form `args` included (161-185; no
+        # deny_unknown_fields there). Its default timeout is 600 s
+        # (hooks/src/engine/discovery.rs:762): every hook sets one.
+        with open(os.path.join(ROOT, "hooks", "hooks.json")) as f:
+            doc = json.load(f)
+        self.assertLessEqual(set(doc), {"description", "hooks"})
+        self.assertLessEqual(set(doc["hooks"]), {
+            "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact",
+            "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit",
+            "SubagentStart", "SubagentStop", "Stop", "Interrupt"})
+        for event, groups in doc["hooks"].items():
+            for group in groups:
+                self.assertLessEqual(set(group), {"matcher", "hooks"})
+                for hook in group["hooks"]:
+                    with self.subTest(event=event, command=hook["command"]):
+                        self.assertLessEqual(set(hook), {
+                            "type", "command", "timeout", "async", "args"})
+                        self.assertEqual(hook["type"], "command")
+                        self.assertIsInstance(hook["timeout"], int)
 
     def test_events(self):
         self.assertEqual(sorted(self.hooks),
@@ -239,6 +325,117 @@ class PluginWiring(unittest.TestCase):
         hook = self.session_start_hook("loadguard-confine")
         self.assertIs(hook["async"], True)
         self.assertLessEqual(hook["timeout"], 10)
+
+class CodexRuns(unittest.TestCase):
+    """Every hooks.json entry, run the way Codex 0.153.4 runs it (k11).
+
+    Codex drops `args` (see test_hooks_json_reads_under_codex), replaces
+    ${PLUGIN_ROOT}, ${CLAUDE_PLUGIN_ROOT}, ${PLUGIN_DATA} and
+    ${CLAUDE_PLUGIN_DATA} in the command text, sets the same four in the
+    environment (hooks/src/engine/discovery.rs:262-270, 566-568) and runs
+    `<shell> -c <command>` (core/src/session/mod.rs:4666;
+    hooks/src/engine/command_runner.rs:390-426). So each entry has to find
+    the data directory in $CLAUDE_PLUGIN_DATA alone.
+
+    The plugin root is a copy of hooks/ with a stub lib/loadguard that
+    records what it was called with: nothing is built or confined, and the
+    real claude above the test run is never touched.
+    """
+
+    STUB_BUILD = (
+        "import os\n"
+        "def ensure(root, data_dir):\n"
+        "    with open(os.path.join(data_dir, 'built'), 'w') as f:\n"
+        "        f.write(root + '\\n' + data_dir)\n"
+        "    return 'built'\n")
+    STUB_CONFINE = (
+        "import os\n"
+        "def confine(session_id):\n"
+        "    with open(os.path.join(os.environ['CLAUDE_PLUGIN_DATA'], "
+        "'confined'), 'w') as f:\n"
+        "        f.write(str(session_id))\n"
+        "    return 'stub'\n")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.join(tmp.name, "plugins", "cache", "getty",
+                                 "loadguard", "0.1.1")
+        self.data = os.path.join(tmp.name, "plugins", "data",
+                                 "loadguard-getty")
+        shutil.copytree(os.path.join(ROOT, "hooks"),
+                        os.path.join(self.root, "hooks"))
+        lib = os.path.join(self.root, "lib", "loadguard")
+        os.makedirs(lib)
+        for name, text in (("__init__.py", ""), ("build.py", self.STUB_BUILD),
+                           ("confine.py", self.STUB_CONFINE)):
+            with open(os.path.join(lib, name), "w") as f:
+                f.write(text)
+        # A stand-in hook binary that echoes its stdin.
+        os.makedirs(os.path.join(self.data, "bin"))
+        binary = os.path.join(self.data, "bin", "loadguard-hook")
+        with open(binary, "w") as f:
+            f.write("#!/bin/sh\nexec cat\n")
+        os.chmod(binary, 0o755)
+        with open(os.path.join(ROOT, "hooks", "hooks.json")) as f:
+            self.hooks = json.load(f)["hooks"]
+
+    def codex_run(self, hook, stdin):
+        env = {"PATH": os.environ["PATH"]}
+        for key, value in (("PLUGIN_ROOT", self.root),
+                           ("PLUGIN_DATA", self.data)):
+            env[key] = env["CLAUDE_" + key] = value
+        command = hook["command"]
+        for key, value in env.items():
+            command = command.replace("${%s}" % key, value)
+        return subprocess.run(["/bin/sh", "-c", command], input=stdin,
+                              capture_output=True, timeout=10, env=env,
+                              cwd=self.data)
+
+    def payload(self, name):
+        with open(os.path.join(CODEX, name), "rb") as f:
+            return f.read()
+
+    def entries(self):
+        for event, groups in sorted(self.hooks.items()):
+            for group in groups:
+                for hook in group["hooks"]:
+                    yield event, hook["command"].rsplit("/", 1)[1], hook
+
+    def test_every_entry(self):
+        fixtures = {"PreToolUse": "pre-tool-use.json",
+                    "UserPromptSubmit": "user-prompt-submit.json",
+                    "SessionStart": "session-start.json"}
+        seen = set()
+        for event, name, hook in self.entries():
+            with self.subTest(event=event, hook=name):
+                stdin = self.payload(fixtures[event])
+                proc = self.codex_run(hook, stdin)
+                self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+                seen.add(name)
+                if name == "loadguard":
+                    # The starter reached the binary through the env.
+                    self.assertEqual(proc.stdout, stdin)
+                    continue
+                self.assertEqual(proc.stdout, b"")
+                marker = os.path.join(self.data, {
+                    "loadguard-build": "built",
+                    "loadguard-confine": "confined"}[name])
+                # The build runs detached: wait for it, at most 5 s.
+                deadline = time.monotonic() + 5
+                while not os.path.exists(marker):
+                    self.assertLess(time.monotonic(), deadline, name)
+                    time.sleep(0.02)
+                with open(marker) as f:
+                    got = f.read()
+                os.remove(marker)
+                if name == "loadguard-build":
+                    self.assertEqual(got, self.root + "\n" + self.data)
+                else:
+                    self.assertEqual(got, json.loads(stdin)["session_id"])
+        self.assertEqual(seen, {"loadguard", "loadguard-build",
+                                "loadguard-confine"})
+
 
 if __name__ == "__main__":
     unittest.main()

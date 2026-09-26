@@ -1,39 +1,45 @@
-"""Stage 1: move the claude session into a transient systemd user scope (k3).
+"""Stage 1: move the agent session into a transient systemd user scope (k3).
 
-Called once per SessionStart from hooks/loadguard-confine. The claude process
-goes into app-loadguard.slice/loadguard-<session>-<pid>.scope with memory and
-CPU limits; everything it starts later inherits the scope. Commands are never
+Called once per SessionStart from hooks/loadguard-confine. The session
+process — claude, or codex (k11) — goes into
+app-loadguard.slice/loadguard-<session>-<pid>.scope with memory and CPU
+limits; everything it starts later inherits the scope. Commands are never
 rewritten.
 
 The calls go through `busctl --user call`: no D-Bus wire protocol
 reimplemented here. busctl ships with systemd, and without systemd there is
 nothing to attach to.
 
-- StartTransientUnit with PIDs= holding claude alone (k12). systemd checks the
-  PIDs, answers the call, and moves them later: a PID that vanished meanwhile
-  fails the whole unit (Result=resources) while busctl still returns 0. The
-  other SessionStart hooks run as claude's children at the same moment and
-  exit within milliseconds, so only claude, an ancestor of this hook and
-  alive for sure, goes into PIDs=.
-- Once /proc shows claude in the scope, the descendants it started before
+- StartTransientUnit with PIDs= holding the session process alone (k12).
+  systemd checks the PIDs, answers the call, and moves them later: a PID
+  that vanished meanwhile fails the whole unit (Result=resources) while
+  busctl still returns 0. The other SessionStart hooks run as its children
+  at the same moment and exit within milliseconds, so only the session
+  process, an ancestor of this hook and alive for sure, goes into PIDs=.
+- Once /proc shows it in the scope, the descendants it started before
   (MCP servers, the other hooks) are moved with AttachProcessesToUnit, which
   is synchronous and needs Delegate=yes. One gone PID fails a batch without
   moving anything, so a failed batch is repeated one PID at a time, and a
   PID that fails alone is left where it is.
-- No second StartTransientUnit: with claude alone nothing in the call races,
+- No second StartTransientUnit: with one PID nothing in the call races,
   and what is left (bus, properties, systemd refusing) fails the same way
   again. A retry would also need a new name, as the failed unit keeps its
   name ("already loaded") until systemd collects it.
 
 Rules:
-- The claude process is the nearest ancestor of the hook whose comm or argv[0]
-  is `claude` — looked up in /proc, never assumed to be the parent.
+- The session process is the nearest ancestor of the hook whose comm or
+  argv[0] is `claude` or `codex` — looked up in /proc, never assumed to be
+  the parent. Codex spawns hooks (`<shell> -c <command>`) from the process
+  that hosts the thread: the TUI and `codex exec` are one process per
+  session; a shared `codex app-server` daemon hosts many threads and is
+  confined once, for all of them, by the next rule — as a nested
+  `claude -p` shares its parent's limit.
 - Already in any loadguard-*.scope: nothing happens. That makes SessionStart
   on resume/clear/compact a no-op and keeps a `claude -p` started from a
   confined session inside its parent's scope; moving it out would let it
   escape the limit.
 - No linger for the user: nothing happens. Without linger the user manager,
-  and with it the scope, stops at the last logout, taking along a claude
+  and with it the scope, stops at the last logout, taking along a session
   that was meant to outlive it in screen/tmux.
 - LOADGUARD_CONFINE=0: nothing happens. Only the exact value "0" is off;
   anything else, typos included, keeps the protective default.
@@ -61,7 +67,8 @@ DEFAULTS = (("MemoryHigh", "LOADGUARD_MEMORY_HIGH", 30, 1, 100),
             ("MemorySwapMax", "LOADGUARD_MEMORY_SWAP_MAX", 10, 0, 100),
             ("CPUWeight", "LOADGUARD_CPU_WEIGHT", 50, 1, 10000))
 
-MAX_DEPTH = 8          # ancestors searched for claude
+SESSION_NAMES = ("claude", "codex")
+MAX_DEPTH = 8          # ancestors searched for the session process
 BUSCTL_TIMEOUT_S = 2
 CONFIRM_S = 1.0        # wait this long for the asynchronous move
 
@@ -149,23 +156,31 @@ def ppid(root, pid):
     return int(stat[stat.rindex(")") + 2:].split()[1])
 
 
-def is_claude(root, pid):
+def session_name(root, pid):
+    """"claude" or "codex" if pid's comm or argv[0] is one of them, else None.
+
+    The npm launcher of Codex is node; the binary it starts is codex. Hooks
+    never run below Codex's sandbox helpers (argv[0] codex-linux-sandbox),
+    which Codex starts for commands only.
+    """
     try:
-        if read(root, "/proc/%d/comm" % pid).strip() == "claude":
-            return True
+        comm = read(root, "/proc/%d/comm" % pid).strip()
+        if comm in SESSION_NAMES:
+            return comm
         argv0 = read(root, "/proc/%d/cmdline" % pid).split("\0")[0]
-        return os.path.basename(argv0) == "claude"
+        name = os.path.basename(argv0)
+        return name if name in SESSION_NAMES else None
     except OSError:
-        return False
+        return None
 
 
-def find_claude(root, start):
-    """(claude pid, [pids between it and start]) or (None, [])."""
+def find_session(root, start):
+    """(session pid, [pids between it and start]) or (None, [])."""
     chain, pid = [], start
     for _ in range(MAX_DEPTH):
         if pid <= 1:
             break
-        if is_claude(root, pid):
+        if session_name(root, pid):
             return pid, chain
         chain.append(pid)
         pid = ppid(root, pid)
@@ -297,7 +312,7 @@ def find_busctl(environ):
 
 def confine(session_id, start=None, root="", environ=None, uid=None,
             me=None):
-    """Attach the session's claude process to its scope. Returns a status word.
+    """Attach the session process to its scope. Returns a status word.
 
     Only the caller turns exceptions into fail-open; here a missing
     precondition is a status, not an error.
@@ -309,9 +324,9 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
     if disabled(environ):
         return "disabled"
 
-    pid, chain = find_claude(root, start)
+    pid, chain = find_session(root, start)
     if pid is None:
-        return "no-claude"
+        return "no-session"
     path = cgroup(root, pid)
     if path is None:
         return "no-cgroup-v2"
@@ -332,13 +347,15 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
         return "no-meminfo"
 
     name = scope_name(session_id, pid)
-    description = "loadguard: claude session %s" % (session_id or pid)
+    description = "loadguard: %s session %s" % (session_name(root, pid),
+                                                 session_id or pid)
     if not start_scope(busctl, name, [pid], props, description):
         return "start-failed"
     if not wait_attached(root, pid, name):
         return "unconfirmed"
-    # Scanned after the move: what claude forks from now on is inside
-    # already. The hook and any shell between it and claude exit in a moment.
+    # Scanned after the move: what the session forks from now on is inside
+    # already. The hook and any shell between it and the session exit in a
+    # moment.
     others = outside(root, [p for p in descendants(root, pid)
                             if p not in chain and p != me], name)
     if others and not attach(busctl, name, others):

@@ -104,7 +104,8 @@ class Case(unittest.TestCase):
 # --- formatting the reports --------------------------------------------------
 
 class Status(Case):
-    def status(self, root, session="not run from a Claude Code session",
+    def status(self, root,
+               session="not run from a Claude Code or Codex session",
                **env):
         doc = self.driver("report", root, **env)
         return cli.format_status(doc, env, session, "/x/loadguard-hook (t)")
@@ -117,7 +118,7 @@ class Status(Case):
             "slots:   1/2 heavy busy",
             "         prove -lr t/ in ~/dev/sunriser",
             "heavy:   a heavy command would run now",
-            "session: not run from a Claude Code session",
+            "session: not run from a Claude Code or Codex session",
             "hook:    /x/loadguard-hook (t)"])
 
     def test_slots_full(self):
@@ -234,6 +235,17 @@ class FindBinary(Case):
                     ("/h/.claude/plugins/data/" + data,
                      "installed as loadguard@" + market))
 
+    def test_installed_under_codex(self):
+        # Codex (k11): ~/.codex/plugins/cache/<marketplace>/<plugin>/<version>
+        # with the data in ~/.codex/plugins/data/<plugin>-<marketplace>
+        # (codex-rs core-plugins/src/store.rs:131-146) — the directory the
+        # hooks get as $CLAUDE_PLUGIN_DATA; the shell tool gets no plugin env.
+        self.assertEqual(
+            cli.find_data_dir("/h/.codex/plugins/cache/getty/loadguard/0.1.1",
+                              {"HOME": "/h"}),
+            ("/h/.codex/plugins/data/loadguard-getty",
+             "installed as loadguard@getty"))
+
     def test_checkout(self):
         d = self.tmpdir()
         checkout, home = os.path.join(d, "co"), os.path.join(d, "home")
@@ -337,13 +349,14 @@ class Doctor(Case):
 
     def host(self, cgroup="0::/user.slice/user-1000.slice/user@1000.service/"
              "app.slice/app-loadguard.slice/" + SCOPE,
-             controllers="cpu memory pids", linger=True, bus=True, **env):
+             controllers="cpu memory pids", linger=True, bus=True,
+             agent="claude", **env):
         d = self.tmpdir()
         root = os.path.join(d, "root")
         write(os.path.join(root, "proc/sys/kernel/random/boot_id"), "b1\n")
         write(os.path.join(root, "proc/meminfo"), "MemTotal: 8025928 kB\n")
         # claude (4100) -> the Bash tool's shell (4200) -> this CLI (4242)
-        for pid, ppid, comm in ((4100, 1, "claude"), (4200, 4100, "bash"),
+        for pid, ppid, comm in ((4100, 1, agent), (4200, 4100, "bash"),
                                 (4242, 4200, "python3")):
             add_process(root, pid, ppid, comm, [comm], cgroup, HOME)
             write(os.path.join(root, "proc", str(pid), "comm"), comm + "\n")
@@ -409,11 +422,22 @@ class Doctor(Case):
                       % UNCONFINED[3:], out)
         self.assertIn("-> sessions are confined when they start", out)
 
+    def test_codex_session(self):
+        # k11: the same lookup finds codex (a terminal run of the CLI: in
+        # Codex's sandbox /proc is the sandbox's own PID namespace).
+        rc, out, _ = self.doctor(*self.host(agent="codex"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("  ok    this session: confined in %s\n" % SCOPE, out)
+        rc, out, _ = self.doctor(*self.host(agent="codex",
+                                            cgroup=UNCONFINED))
+        self.assertIn("  FAIL  this session: not confined (cgroup %s)\n"
+                      % UNCONFINED[3:], out)
+
     def test_not_in_a_session(self):
         rc, out, _ = self.doctor(*self.host(), start=1)
         self.assertEqual(rc, 0, out)
         self.assertIn("  --    this session: not run from a Claude Code "
-                      "session\n", out)
+                      "or Codex session\n", out)
 
     def test_switched_off(self):
         root, environ = self.host(linger=False, cgroup=UNCONFINED,

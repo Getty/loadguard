@@ -1,0 +1,16 @@
+{
+  "session_id": "019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9",
+  "turn_id": "019a7c41-7a03-7e21-b5c8-0d4e9f12a6b3",
+  "agent_id": "019a7c40-e8f9-7a66-a1d2-5b7c3e90f4d8",
+  "agent_type": "default",
+  "transcript_path": null,
+  "cwd": "/home/getty/dev/simpici",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-6-astra",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls -la"
+  },
+  "tool_use_id": "call_Hs8Kd2Qp5Vn7Xr1Tb4Mz9Lc3"
+}

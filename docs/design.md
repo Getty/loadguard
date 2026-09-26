@@ -88,7 +88,7 @@ Umgesetzt (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
   Nachkommen mitverschoben; in beiden Live-Sessions war der Hook vor dem ersten
   Bash fertig.
 - **Welcher Prozess:** der nächste Vorfahr des Hooks mit `comm` oder `argv[0]`
-  `claude` (höchstens 8 Ebenen), aus `/proc` gelesen.
+  `claude` (höchstens 8 Ebenen; seit k11 auch `codex`), aus `/proc` gelesen.
 - **Eine Regel für Idempotenz und Verschachtelung:** Liegt dieser claude schon in
   irgendeinem `loadguard-*.scope`, passiert nichts. resume/clear/compact sind damit
   No-ops, und ein `claude -p` aus einer eingesperrten Session bleibt im Scope der
@@ -124,8 +124,8 @@ startet, und Befehle nicht umgeschrieben werden (k3). Keine Locks, nichts bleibt
 hängen; akzeptiertes Rennen: zwei Sessions, die im selben Moment starten, sehen beide
 einen freien Slot. Schwer = Muster (`prove`, `dzil test|build|release`,
 `make test`, `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
-`perlbench`, `claude --bg`, `claude -p`) **plus** alles, was nachträglich im
-Scope viel Speicher gezogen hat (Lernliste, später).
+`perlbench`, `claude --bg`, `claude -p`, seit k11 `codex exec`) **plus** alles,
+was nachträglich im Scope viel Speicher gezogen hat (Lernliste, später).
 
 Kein freier Slot → Stufe 3 statt stillem Warten (die KI soll wissen, dass sie wartet).
 
@@ -377,6 +377,120 @@ Umgesetzt (k5, `bin/loadguard`, `lib/loadguard/cli.py`; Tests
   Die Karte nannte `systemd-run` — seit k3 ist es `busctl`.
 - **Kosten der CLI** (reuben): `status`/`explain` ~47 ms, `doctor` ~80 ms,
   fast nur Python-Start. Das Binary allein: `--report` ~4 ms mit Scan.
+
+### Codex (k11)
+
+Dasselbe Plugin für Codex (`codex-cli 0.153.4` auf reuben), nachgelesen in
+den Quellen `rust-v0.153.4` (codex-rs, Pfade unten relativ dazu). Getty
+2026-09-26: Macht Codex echte Probleme, bleibt es draußen.
+
+Umgesetzt (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
+`src/loadguard-hook.c`; Tests `t/test_hook_passthrough.py` `CodexRuns`,
+`PluginWiring`, `t/test_confine.py`, `t/test_throttle.py`
+`CodexPayloads`, Fixtures `t/fixtures/codex/`,
+`t/fixtures/procs/codex-*.json`):
+
+- **Ein `hooks/hooks.json` für beide**, wie bei `~/dev/briefing`.
+  `.codex-plugin/plugin.json` hat dieselben Felder wie
+  `.claude-plugin/plugin.json` plus `hooks: "./hooks/hooks.json"`, keine
+  Skills; ein Test verlangt jedes gemeinsame Feld gleich, damit ein Release
+  nicht nur eine Version hebt. Codex liest die Datei mit
+  `deny_unknown_fields` nur auf oberster Ebene (`description`, `hooks`;
+  `config/src/hook_config.rs:10-17`), ein Handler ignoriert Unbekanntes —
+  auch Claude Codes `args` (161-185). Timeout-Default wäre 600 s
+  (`hooks/src/engine/discovery.rs:762`); wir setzen 5/10.
+- **Wie Codex einen Hook startet:** `${PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`,
+  `${PLUGIN_DATA}`, `${CLAUDE_PLUGIN_DATA}` werden im Befehlstext ersetzt
+  und in die Umgebung gesetzt (`discovery.rs:262-270, 566-568`), dann
+  `<Session-Shell> -c <Befehl>` (`core/src/session/mod.rs:4666`,
+  `hooks/src/engine/command_runner.rs:390-426`), Umgebung = die von codex
+  selbst (`hooks/src/registry.rs:77`). Ohne `args` finden alle drei
+  Einträge das Datenverzeichnis über `$CLAUDE_PLUGIN_DATA`; `CodexRuns`
+  startet jeden Eintrag genau so. Hooks laufen nicht in der Sandbox (von
+  codex selbst gestartet, eigene Prozessgruppe, `command_runner.rs:216-242`)
+  — busctl erreicht den User-Bus.
+  Datenverzeichnis `~/.codex/plugins/data/<plugin>-<marketplace>`
+  (`core-plugins/src/store.rs:141`) = derselbe Name wie bei Claude Code
+  (`loadguard-getty`): `bin/loadguard` findet das Binary über den
+  Installationspfad.
+- **Ereignisse:** SessionStart kommt beim ersten Turn, vor
+  UserPromptSubmit (`core/src/session/turn.rs:264-268`); gespawnte
+  Subagenten bekommen SubagentStart statt SessionStart
+  (`core/src/hook_runtime.rs:130-146`) — ihr PreToolUse trägt
+  `agent_id`/`agent_type`. Das Shell-Tool (`exec_command`) erreicht
+  PreToolUse als `tool_name: "Bash"`, `tool_input: {"command": …}` ohne
+  weitere Felder (`core/src/tools/handlers/unified_exec/exec_command.rs:504-515`).
+  Deny-JSON und `additionalContext` sind die Claude-Code-Formen; die
+  Ausgabe-Structs lehnen unbekannte Felder ab (`hooks/src/schema.rs`), also
+  nur `hookSpecificOutput` (schon seit k6). Exit ≠ 0 außer 2 und ein
+  Timeout blockieren bei Codex nicht, sie erscheinen als Hook-Fehler
+  (`hooks/src/events/pre_tool_use.rs:278-291`, `command_runner.rs:317-327`)
+  — fail-open wie bei Claude Code. `CodexPayloads`: für
+  jede Wurzel, Umgebung und jeden Befehl dieselben Bytes wie mit dem
+  Claude-Code-Payload, Deny wie Kontextzeile.
+- **Einsperren:** Sessionprozess ist der nächste Vorfahr mit `comm` oder
+  `argv[0]` `claude` **oder `codex`** (`session_name()`,
+  `find_session()`; npm-Start: node → `vendor/<triple>/bin/codex`, der
+  zählt). Name, Slice und Idempotenz wie bisher; die Unit-Beschreibung
+  nennt den Harness (`loadguard: codex session <id>`), das Statuswort heißt
+  `no-session`, die CLI „not run from a Claude Code or Codex session".
+  `codex exec` hostet seine Session immer im eigenen Prozess
+  (`exec/src/lib.rs:812`), die TUI eingebettet
+  (`tui/src/lib.rs:255-282`) — **außer** ein lokaler App-Server-Daemon
+  antwortet binnen 50 ms auf seinem Socket und der Start hat keine
+  Overrides wie `-c` (`tui/src/lib.rs:447-470, 860-929`). Der Daemon
+  (`codex app-server [--remote-control] --listen unix://`, per `setsid`
+  abgelöst, `app-server-daemon/src/backend/pid.rs:156-182, 413-421`;
+  ebenso der `codex app-server` der VS-Code-Extension,
+  `app-server/README.md:3`) hostet viele Threads in einem
+  Prozess und startet ihre Hooks. **Entschieden: ein gemeinsamer Scope, kein
+  Überspringen.** Der erste Thread schiebt den Daemon in
+  `loadguard-<thread>-<pid>.scope`, alle weiteren finden ihn dort
+  („already") und teilen das Limit — dieselbe Regel wie bei verschachteltem
+  `claude -p`. Das ist nie schwächer als ein Scope pro Session; Überspringen
+  ließe genau diese Sessions ganz ohne Grenze laufen und ihre Befehle
+  außerhalb der Slice, also auch für die Slot-Zählung unsichtbar. Preis:
+  Threads verschiedener Projekte bremsen einander bei `MemoryHigh`, der
+  Scope trägt den Namen des ersten Threads und lebt so lange wie der
+  Daemon. Auf reuben war Remote Control schon einmal an
+  (`~/.codex/app-server-daemon/settings.json`), der Daemon lief am
+  2026-09-26 nicht.
+- **Schwer (eingehend):** `codex exec` und sein Alias `codex e`
+  (`codex --help`) sind wie `claude -p`/`--bg` eine neue Headless-Session:
+  schwer beim Start, kein Slot. Gesucht wird das Wort irgendwo nach
+  `codex`, wie `-p` bei claude — Codex nimmt globale Optionen vor dem
+  Unterbefehl (`codex -m o3 exec …`). Die Art heißt jetzt `K_AGENT`; ihr Rat
+  nennt beide: „Do not start new `claude -p`/`claude --bg` or `codex exec`
+  sessions now; do the work in this one." Die Kontextzeile bleibt: Sie
+  steht mit 216 Zeichen genau an ihrer Grenze (`test_line_stays_short`),
+  „, codex exec" passt nicht hinein; verweigert wird es trotzdem.
+- **Schwer (laufend):** Codex führt Befehle auf reuben (`workspace-write`,
+  kein System-bwrap) so aus: codex → `codex-linux-sandbox` (Symlink auf
+  codex, `comm` `codex-linux-san`) → gebündeltes `bwrap` (per
+  `/proc/self/fd/N` gestartet, `comm` ist die Zahl) → wieder
+  `codex-linux-sandbox` als PID 1 der neuen Namespaces (`comm` `codex`) →
+  `/bin/bash -c <cmd>` → prove. Kein cgroup-Namespace: alles liegt im
+  Scope. Die Helfer haben den Befehl erst hinter `--` in argv; beurteilt
+  wird argv[0] — sie sind leicht und verdecken nichts
+  (`codex-session.json`, Belegstellen in `t/fixtures/README.md`). `bash
+  -lc` (vor dem Shell-Snapshot) ist kein erkannter Inline-Code-Schalter:
+  Der Codetext wird wie ein Skriptpfad beurteilt und ist nur als nacktes
+  `prove` schwer — dann hält die Shell statt prove denselben einen Slot.
+- **Kosmetik, gelassen:** Codex hängt an den Grund `. Command: <cmd>`
+  (`core/src/hook_runtime.rs:229-234`); unser Grund endet mit `.`, das
+  Modell liest `run..`. Ändern hieße, Claude Codes Bytes zu ändern oder den
+  Harness zu erkennen — nicht trivial genug.
+- **Grenzen:** Codex legt das `bin/` eines Plugins nicht auf den PATH der
+  Shell (nur Paket- und zsh-Pfad, `core/src/tools/runtimes/mod.rs:118-144`)
+  — `loadguard status` in der Kontextzeile findet ein Codex-Modell nicht
+  unter diesem Namen. In der Sandbox ist `/proc` das des eigenen
+  PID-Namespace (`--proc /proc`): `status`/`explain` von dort sehen nur die
+  eigenen Prozesse; vom Terminal aus aufrufen. Hooks laufen erst nach dem
+  Trust-Prompt, pro Handler, und eine geänderte hooks.json verlangt neuen
+  Trust (`discovery.rs:676-725, 794-812`); `codex exec` kann ihn nicht
+  erteilen.
+- **Offen: Live-Test mit Getty** (Trust-Prompt), danach der Eintrag in
+  `~/dev/marketplace/.agents/plugins/marketplace.json`.
 
 ## Nicht-Ziele
 

@@ -18,8 +18,12 @@ does not). Else, for a copy installed from a marketplace, which lives in
 <plugins>/cache/<marketplace>/<plugin>/<version>/, its data directory
 <plugins>/data/<id>: the id <plugin>@<marketplace> with every character
 but letters, digits, _ and - turned into - (plugins-reference, "Environment
-variables"). Else, in a checkout, build/bin (make), or the data directory of
-a --plugin-dir session (<name>@inline).
+variables"). Codex (k11) keeps the same layout under ~/.codex/plugins with
+the data directory <plugin>-<marketplace> (codex-rs core-plugins
+store.rs:141): the same name, as Codex allows only letters, digits, _ and -
+in a marketplace name (plugin/src/plugin_id.rs:51-70). Else,
+in a checkout, build/bin (make), or the data directory of a --plugin-dir
+session (<name>@inline).
 """
 
 import json
@@ -109,13 +113,14 @@ def payload(command):
 # --- the session -------------------------------------------------------------
 
 def session(proc_root="", start=None):
-    """(claude pid, its cgroup path) of the session this runs in.
+    """(session pid, its cgroup path) of the claude or codex session this
+    runs in.
 
-    pid None outside a Claude Code session; path None without cgroup v2.
+    pid None outside a session; path None without cgroup v2.
     """
     start = os.getppid() if start is None else start
     try:
-        pid, _ = confine.find_claude(proc_root, start)
+        pid, _ = confine.find_session(proc_root, start)
         return pid, (confine.cgroup(proc_root, pid) if pid else None)
     except (OSError, ValueError, IndexError):
         return None, None
@@ -131,7 +136,7 @@ def scope_of(path):
 
 def session_text(pid, path):
     if pid is None:
-        return "not run from a Claude Code session"
+        return "not run from a Claude Code or Codex session"
     scope = scope_of(path)
     if scope:
         return "confined in " + scope

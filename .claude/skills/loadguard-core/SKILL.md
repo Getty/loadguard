@@ -6,10 +6,10 @@ user-invocable: false
 
 # loadguard — core
 
-loadguard is a Claude Code plugin: a `PreToolUse` hook on `Bash` that confines, limits
-and, under pressure, refuses AI-issued shell commands, and tells the model why. Design
-and rationale: `docs/design.md`. This skill holds what an implementer must not get
-wrong.
+loadguard is a Claude Code plugin, and a Codex one from the same `hooks/hooks.json`
+(k11): a `PreToolUse` hook on `Bash` that confines, limits and, under pressure,
+refuses AI-issued shell commands, and tells the model why. Design and rationale:
+`docs/design.md`. This skill holds what an implementer must not get wrong.
 
 ## Hook contract (Claude Code)
 
@@ -83,7 +83,8 @@ overflow).
 ## Confinement
 
 Stage 1 confines the **session**, not each command (decided 2026-09-26 after k3):
-the SessionStart hook moves the `claude` process into a transient user scope with
+the SessionStart hook moves the session process — the nearest ancestor whose
+comm or argv[0] is `claude` or `codex` (`find_session()`) — into a transient user scope with
 `MemoryHigh`/`MemoryMax`/`MemorySwapMax`/`CPUWeight` (D-Bus `StartTransientUnit`,
 `PIDs=`). Never rewrite commands for confinement — a rewrite breaks the user's
 permission rules and loses `cd`. Verified on reuben: memory controller delegated to
@@ -117,7 +118,7 @@ heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTT
 - Running: judge argv, not text — argv[0] basename, an interpreter's script,
   never inline code (`bash -c`, `perl -e`: that is Claude Code's wrapper). Count
   only the topmost heavy process of a chain in the slice. `claude -p`/`--bg`
-  are heavy to start but hold no slot.
+  and `codex exec` are heavy to start but hold no slot.
 - Advice: under memory pressure wait, light commands still run — **never a
   test run**, not even one file, and never a command the classifier lets
   through (`perl t/x.t`): that teaches the way around the guard, and one perl
@@ -132,6 +133,32 @@ plus what is refused and what still runs); else not a byte. Full slots alone
 add no line, and the path never scans `/proc`. No test run suggested (see
 advice). No state across prompts. At most 216 characters
 (`test_line_stays_short`).
+
+## Codex (k11)
+
+Verified against the codex-rs `rust-v0.153.4` sources (= `codex-cli 0.153.4`);
+details and file:line in `docs/design.md` → Codex (k11).
+
+- `.codex-plugin/plugin.json` = `.claude-plugin/plugin.json` + `hooks`; a test
+  pins every shared field (bump both versions together).
+- Codex drops `args`, substitutes `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}`
+  (and `PLUGIN_*`) in the command text and env, runs `<shell> -c <command>` with
+  codex's own env, outside the sandbox. Every hook entry must work from
+  `$CLAUDE_PLUGIN_DATA` alone (`CodexRuns`). Top level of hooks.json: only
+  `description`/`hooks`. Output structs deny unknown fields.
+- Shell tool → PreToolUse `tool_name: "Bash"`, `tool_input: {"command"}` only.
+  Same deny JSON, same context JSON; outputs must equal Claude Code's byte for
+  byte (`CodexPayloads`). Codex wraps a deny as `Command blocked by PreToolUse
+  hook: {reason}. Command: {cmd}`.
+- `codex exec|e` = `K_AGENT` like `claude -p`: heavy to start, no slot. Commands
+  run codex → `codex-linux-sandbox` → bwrap → helper (comm `codex`, argv[0]
+  `codex-linux-sandbox`) → `bash -c` → …: helpers are light and hide nothing
+  (`procs/codex-session.json`).
+- A shared `codex app-server` daemon hosts many threads: one scope for all
+  (already-confined rule), never skipped.
+- Plugin `bin/` is not on Codex's shell PATH; in its sandbox `/proc` is the
+  sandbox's PID namespace. Hooks run only after the user trusts them (per
+  handler; a changed hooks.json asks again; `codex exec` cannot grant it).
 
 ## CLI (k5)
 
