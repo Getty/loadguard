@@ -1,0 +1,34 @@
+---
+class: standard
+completed: 2026-09-26T04:49:24Z
+created: 2026-09-25T23:37:15Z
+depends_on:
+- 2
+- 3
+id: 4
+priority: medium
+started: 2026-09-26T04:17:52Z
+status: done
+tags:
+- throttle
+title: 'Stufe 2+3: Heavy-Slots über alle Sessions + Deny mit Begründung'
+updated: 2026-09-26T04:49:24Z
+---
+
+flock-Slots unter $XDG_RUNTIME_DIR/loadguard/, Heavy-Muster, Schwellwerte aus Fixtures kalibriert. Deny-Text: Zahlen + konkrete Alternative. Leichte Befehle nie verweigern. Siehe docs/design.md Stufe 2/3.
+
+2026-09-26 00:19 Getty 2026-09-26: Speichersignal = memory PSI full avg10 (primär) + Swap gesamt aus /proc/meminfo (sekundär); zram-Füllgrad nur Info in der Begründung. Entscheidungslogik im C-Binary. Siehe design.md → Speichersignal.
+
+2026-09-26 02:49 Getty 2026-09-26: Slots per /proc-Scan der schweren Prozesse unter app-loadguard.slice statt flock (Hook kann keinen Lock über die Befehlslaufzeit halten, kein Rewrite). Siehe design.md Stufe 2.
+
+2026-09-26 04:18 Dispatch 2026-09-26: claude -p/--bg zählen als schwerer eingehender Befehl, aber nicht als Slot-Halter im /proc-Scan (langlebige Sessions; deren eigene schwere Befehle zählen einzeln). Deny-Text englisch. Ausschalter LOADGUARD_THROTTLE=0.
+
+2026-09-26 04:27 Kalibrierung (54 Snapshots, parse_incident): ruhig 17/17 mit memory full avg10 <= 2.03 %, Swap gesamt 50.6-68.3 % belegt; Thrash 37/37 mit full avg10 >= 45.47 %, Swap 91.9-100 % (Ausnahmen: 20260816-204258 ohne Swap, 20260917-183232 kurz nach einem Kill mit 20 %/5 GB frei, PSI noch 62.9). Live reuben jetzt: full 0.01, Swap 51.4 %, zram 97.7 %, 270 Prozesse, 36 in app-loadguard.slice, nproc 4 -> N=2. Plan: Deny wenn full avg10 >= 10 (Mitte der Lücke, geometrisch) ODER Swap >= 90 %. Unter Druck kein /proc-Scan: cmdline-Lesen holt die Argumentseiten fremder Prozesse aus dem Swap und kann im Thrash Sekunden blockieren; laut Docs blockt ein Hook-Timeout den Befehl NICHT, er liefe dann doch. Deny-Schema gegen code.claude.com/docs/en/hooks bestätigt (Grund geht an Claude).
+
+2026-09-26 04:41 Also found (nicht meine Karte, nicht angefasst): t/test_confine.py Entry.test_status_flag scheitert, sobald die Tests in einer bereits eingesperrten Session laufen (seit 0.1.1 live): confine() antwortet 'already' vor dem Bus-Check, der Test erwartet nur no-claude/no-bus. Auf einem sauberen Export von HEAD ebenso rot (Prozess in app-loadguard.slice/loadguard-7085681a-2882634.scope). Vorschlag: b'already\n' zulassen.
+
+2026-09-26 04:45 Korrektur zur Kalibrierungs-Notiz oben: die 54 Snapshots teilen sich 18 ruhig / 36 Thrash (nicht 17/37); Swap allein fängt 34 von 36. Schwellen unverändert (PSI 10, Swap 90), design.md trägt die richtigen Zahlen.
+
+2026-09-26 04:45 Done: src/loadguard-hook.c verweigert schwere Befehle (prove, make … test, dzil test|build|release, cpanm, docker|podman build|run, cargo build|test, npm test, perlbench, claude -p|--print|--bg; Befehlsposition, nicht in Quotes/Kommentaren/Heredocs) bei memory full avg10 >= 10 % ODER Swap >= 90 % ODER laufende schwere Befehle in app-loadguard.slice >= max(1,nproc/2). Env: LOADGUARD_PSI_FULL, LOADGUARD_SWAP_USED, LOADGUARD_HEAVY_SLOTS, LOADGUARD_THROTTLE=0. Slot-Scan über argv (Interpreter -> Skript, Inline-Code nie), nur oberster schwerer Prozess je Kette, claude -p/--bg ohne Slot, npm-Prozesstitel. Unter Druck kein Scan (cmdline-Lesen kann im Thrash den Timeout reißen, Timeout blockt nicht). Begründung englisch, 2 Zeilen, Zahlen + Rat je Muster. Kosten reuben (297 Proz.): leicht 0,53 ms, schwer+Scan 3,64 ms (p90 4,44), unter Druck 0,62 ms. Kalibrierung: alle 54 Snapshots als /proc-Baum durchs Binary, 18 ruhig erlaubt, 36 Thrash verweigert; live reuben verweigert nichts. Verifiziert: make ohne Warnungen (build.log leer), unittest 161/162 grün, 0 übersprungen; die 1 rote (test_confine Entry.test_status_flag) ist vorbestehend, siehe Notiz. 45 neue Tests in t/test_throttle.py, Fixtures t/fixtures/procs/*.json; Mutationen (Dedupe aus, Scan unter Druck, Inline-Code als Skript) werden jeweils rot. Docs: design.md Umgesetzt (k4), README, SKILL.md, CHANGELOG, fixtures/README.
+
+2026-09-26 04:49 Committed as 6c9a62b (Refuse heavy Bash commands under memory pressure or with all heavy slots busy). Tests: 162 run, 161 pass; the one known failure (test_confine.Entry.test_status_flag) is pre-existing/environment-dependent, tracked separately as k13, not part of this commit.
