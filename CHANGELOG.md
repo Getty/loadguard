@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- README gets its title image (k9): `assets/github.png` at the top, linked to
+  the repo, quantized to a 256-colour palette to stay under GitHub's 1 MB
+  social-preview limit (805 KB, was 3.17 MB RGB). Install now covers the
+  first session's background build (nothing is refused until it exists),
+  `loadguard doctor` to check it, and updating (`claude plugin update
+  loadguard@getty`, new session, rebuild on changed sources). Requirements
+  note Python 3 is also needed for the CLI. Documents how a refusal actually
+  reaches the model: a failed tool call, `PreToolUse:Bash hook error:
+  <reason>`.
 - Codex support (k11), built against the Codex 0.153.4 sources; the first
   live run under Codex is still ahead, and the Codex marketplace entry is
   not published yet. A new `.codex-plugin/plugin.json` points Codex at the

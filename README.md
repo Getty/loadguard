@@ -1,3 +1,5 @@
+[![loadguard — a llama in a guard's cap and dungarees holds up a hand and lowers a barrier in front of a robot choking on a heap of capsules, while pipes drop single capsules to small robots cheering at their desks](https://raw.githubusercontent.com/Getty/loadguard/main/assets/github.png)](https://github.com/Getty/loadguard)
+
 # loadguard
 
 > **The model can't feel the box swapping. The kernel can.**
@@ -31,8 +33,8 @@ hard reboot:
   54 snapshots.
 - **Memory pressure off the scale.** PSI memory `full avg10` — the share of
   time *every* task was stalled waiting for memory — above 45 % in every thrash
-  snapshot, up to 84 %. In the calm ones it stayed at 2 % or below; there was
-  nothing in between.
+  snapshot, up to 84 %. In the calm ones it stayed at about 2 % at most; there
+  was nothing in between.
 - **Load average up to 85** on 4 cores, most of it tasks stuck waiting for
   pages to come back from swap.
 - **One command was enough.** In one snapshot a single `perl -e` one-liner
@@ -95,7 +97,9 @@ heredoc that mentions `make test` is not. A running command holds one slot
 however many processes it spawns; a nested `claude -p` or `codex exec` holds
 none, but what it runs does.
 
-The refusal is the reason Claude Code hands to the model:
+The model sees the refusal as a failed tool call,
+`PreToolUse:Bash hook error: <reason>`, with the reason telling it what is
+going on:
 
 ```
 loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0% (limit 10%), swap 60% used (limit 90%), zram 97% full.
@@ -177,7 +181,7 @@ The design, with the measurements behind each decision, is in
   manager stops at your last logout and takes its scopes along — including a
   `claude` you left running in `screen` or `tmux`. loadguard therefore does
   not confine without linger.
-- **Python 3** for the `SessionStart` hooks. Standard library only.
+- **Python 3** for the `SessionStart` hooks and the CLI. Standard library only.
 - **A C compiler** (`$CC`, else `cc` or `gcc`) for the first build of the hook.
   It builds in the background into the plugin's data directory and rebuilds
   when its sources change. Without a compiler the hook stays a pass-through.
@@ -265,6 +269,12 @@ claude plugin install loadguard@getty
 
 Or from inside Claude Code: `/plugin marketplace add Getty/marketplace`, then
 `/plugin install loadguard@getty`. New sessions are confined from then on.
+The first session start builds the hook in the background, which takes a few
+seconds; until it exists nothing is refused. `loadguard doctor`, run from a
+new session, shows whether everything is in place.
+
+To update, run `claude plugin update loadguard@getty` and start a new
+session. If the hook's sources changed, it rebuilds on that session start.
 
 ## Turning it off
 
