@@ -6,7 +6,7 @@ agent; subagents get their knowledge from the skills in `briefing.skills`.
 ## Engineering discipline
 
 1. **Think before coding** — state assumptions, ask when unsure, stop when confused.
-2. **Simplicity first** — minimum code, nothing speculative, stdlib only.
+2. **Simplicity first** — minimum code, nothing speculative; Python stdlib only, C with vendored cJSON only.
 3. **Surgical changes** — touch only what the card needs.
 4. **Goal-driven** — define success criteria, loop until verified.
 5. **Fail loud** — "done" is wrong if anything was skipped; "tests pass" is wrong if
@@ -44,7 +44,7 @@ Installing a half-built PreToolUse hook on Bash can wedge every session on the h
 
 ## Hazards — this host is the patient
 
-- **reuben has 4 cores, ~8 GB RAM, 11 GB zram** and has been power-cycled repeatedly
+- **reuben has 4 cores, ~8 GB RAM, 3.2 GB zram + 8 GB swapfile** and has been power-cycled repeatedly
   under memory thrash (evidence: `~/load-incidents/`). Never produce real memory or
   CPU pressure to test loadguard — use fixtures from the incident snapshots.
 - **At most one subagent at a time** here. Parallel workers on this box are part of

@@ -34,8 +34,9 @@ wrong.
    pass the command through untouched and exit 0. A broken guard must never brick
    every session on the host.
 2. **Cheap.** Runs before every Bash call of every session. No subprocess in the
-   normal path (read `/proc` directly — no `jq`, `ps`, `free`), stdlib only,
-   target < 30 ms.
+   normal path (read `/proc` directly — no `jq`, `ps`, `free`), target < 30 ms.
+   The hook path is C with vendored cJSON (Python startup alone costs ~180 ms on
+   reuben); CLI and tests are Python stdlib. No binary yet → pass through.
 3. **Light commands are never refused.** The model must always be able to look
    (`git status`, `ls`, `cat`, `karr show`, `loadguard status`).
 4. **The wrap is transparent.** Exit code, stdout/stderr, working directory, env and
@@ -49,12 +50,14 @@ wrong.
 | Source | Holds |
 |---|---|
 | `/proc/pressure/{memory,io,cpu}` | `some`/`full avg10 avg60 avg300 total` — PSI, the primary signal |
-| `/proc/meminfo` | `MemAvailable`, `SwapTotal`, `SwapFree` (zram fill) |
+| `/proc/meminfo` | `MemAvailable`, `SwapTotal`, `SwapFree` (total swap: zram + swapfile) |
 | `/proc/loadavg` | load — secondary, misleading with D-state pile-ups |
 | `/sys/fs/cgroup/<scope>/memory.peak`, `memory.events` | what a finished wrapped command actually used / whether it hit `oom_kill` |
 
-`cpu some` is routinely high on reuben and is not an emergency on its own; memory
-`full` and zram fill are what precede the thrash reboots.
+`cpu some` is routinely high on reuben and is not an emergency on its own. Memory
+`full avg10` (primary) and total swap fill (secondary) precede the thrash reboots;
+zram fill alone does not — zram0 sits at ~98 % when calm (the swapfile takes the
+overflow). `updatedInput` semantics (replace vs. merge) are unverified until k7 pins them.
 
 ## Confinement
 

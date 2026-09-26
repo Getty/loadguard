@@ -28,5 +28,7 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | `lib/loadguard/` | Gemeinsamer Code für Hook und CLI (`snapshot.py`: Messung) |
 | `t/` | Tests (`python3 -m unittest discover -s t -v`), Fixtures aus `~/load-incidents/` |
 
-Sprache Python 3, nur stdlib — wie `~/dev/briefing`, das als Referenz für
-Plugin-Aufbau, `hooks.json` und `${CLAUDE_PLUGIN_ROOT}` dient.
+Hook-Pfad in C (vendored cJSON, Build beim ersten Lauf, fail-open ohne Binary);
+CLI und Tests in Python 3, nur stdlib. Begründung: `docs/design.md` → Sprache und
+Build. `~/dev/briefing` dient als Referenz für Plugin-Aufbau, `hooks.json` und
+`${CLAUDE_PLUGIN_ROOT}`.

@@ -2,14 +2,14 @@
 
 Claude-Code-Plugin (Getty-Marketplace), das die Last, die KI-Prozesse auf dem Host
 erzeugen, **misst, begrenzt und an die KI zurückmeldet**, damit sie selbst
-gegensteuern kann. Ziel-Host zuerst: `reuben` (4 Cores, ~8 GB RAM, 11 GB zram).
+gegensteuern kann. Ziel-Host zuerst: `reuben` (4 Cores, ~8 GB RAM; Swap = 3,2 GB zram0 + 8 GB `/swapfile`).
 
 ## Problem, belegt
 
 `~/load-incidents/*.txt` (54 Snapshots von `~/bin/load-watchdog.sh`, ausgelöst ab
 loadavg ≥ 20). Muster vor den Power-Knopf-Reboots:
 
-- RAM voll, **zram 100 % voll**, Memory-/IO-PSI `full` > 50 %, Load bis 45.
+- RAM voll, **Swap (zram + Swapfile) 100 % voll**, Memory-/IO-PSI `full` > 50 %, Load bis 45.
 - 5–7 parallele `claude`-Sessions, jede im D-State (`folio_wait_bit_common`).
 - **Ein einzelner Befehl frisst alles**: `20260917-175030.txt` zeigt ein
   `perl -Ilib -MJSON::Schema::Modern -e …` mit **3,8 GB RSS (48 % RAM)** — ein
@@ -62,13 +62,24 @@ Scope viel Speicher gezogen hat (Lernliste, später).
 
 Kein freier Slot → Stufe 3 statt stillem Warten (die KI soll wissen, dass sie wartet).
 
+### Speichersignal (entschieden 2026-09-26)
+
+Aus den 54 Snapshots (k2): **memory PSI `full avg10`** trennt scharf — < 2 % in der
+CPU-lastigen Phase, > 45 % in jedem Thrash-Snapshot, nichts dazwischen. `avg10`, nicht
+`avg60/300`: der Thrash kommt schlagartig (175030: avg10 63 %, avg300 20 %).
+Nebensignal: **Swap gesamt** (`SwapFree/SwapTotal` aus `/proc/meminfo`) — 100 % belegt
+in jedem Thrash-Snapshot, nie in der ruhigen Phase. **zram-Füllgrad allein ist kein
+Signal**: zram0 steht schon im Ruhezustand bei ~98 %, das Swapfile nimmt den Überlauf;
+er erscheint nur als Info in der Begründung. `MemAvailable` ist schwach (1,1–1,7 GB
+auch im Thrash). `cpu some` ist auf reuben routinemäßig hoch und kein Notfall.
+
 ### Stufe 3 — Ablehnen mit Begründung
 
 Bei Druck oberhalb der Schwelle (PSI memory `some avg10`, `full avg10`,
 zram-Füllgrad, freie Slots) wird ein schwerer Befehl verweigert. Die Begründung ist
 das Produkt — kurz, messbar, mit konkreter Alternative:
 
-> loadguard: memory pressure full=38% (limit 20%), zram 91%, 2/2 heavy slots busy
+> loadguard: memory pressure full=38% (limit 20%), swap 97%, 2/2 heavy slots busy
 > (prove -lr t/ in ~/dev/sunriser, perlbench). Warte, oder teste gezielt
 > (`prove -l t/foo.t` statt `-r`). Keine neuen `claude --bg` starten.
 
@@ -104,5 +115,20 @@ konservativ für 8 GB / 4 Cores.
 ## Lieferung
 
 Eigenes Repo, später Eintrag in `~/dev/marketplace` (`Getty/marketplace`), analog
-`briefing`. Python 3 wie `briefing`, keine Fremdmodule, Hook-Laufzeit im Normalfall
-< 30 ms (er läuft vor **jedem** Bash-Aufruf aller Sessions).
+`briefing`. Hook-Laufzeit im Normalfall < 30 ms (er läuft vor **jedem** Bash-Aufruf
+aller Sessions).
+
+### Sprache und Build (entschieden 2026-09-26)
+
+Gemessen (k1): Ein Python-Hook kostet auf reuben im Median 183 ms, p90 346 ms — fast
+nur Interpreter-Start. Daher:
+
+- **Hook-Pfad in C** (Payload lesen, `/proc` messen, einwickeln, entscheiden). JSON
+  über **vendored cJSON** (`vendor/cJSON.{c,h}`, MIT) — kein handgebautes Parsen, keine
+  `-dev`-Pakete auf dem Zielhost, nur ein C-Compiler.
+- **CLI (`status`/`doctor`/`explain`) und Tests bleiben Python** (stdlib). `explain`
+  ruft das Binary, damit die Entscheidungslogik genau einmal existiert.
+  `lib/loadguard/snapshot.py` (k2) bleibt für CLI und Tests.
+- **Build beim ersten Lauf** auf dem Zielhost. Solange kein Binary da ist (kein
+  Compiler, Build läuft noch, Build fehlgeschlagen): **fail-open Pass-through**.
+  Der Build darf nie einen Bash-Aufruf blockieren.
