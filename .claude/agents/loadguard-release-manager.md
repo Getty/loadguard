@@ -6,7 +6,7 @@ allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - getty-git-commit-style
-    - kanban-issues-karr-cli
+    - kanban-issues-karr-ticket
 ---
 
 You are the loadguard-release-manager for **loadguard**. The conventions above are
