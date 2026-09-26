@@ -1,0 +1,19 @@
+cJSON — vendored, unmodified
+
+Upstream:  https://github.com/DaveGamble/cJSON
+Release:   v1.7.19 (2025-09-09), tag commit c859b25da02955fef659d658b8f324b5cde87be3
+Tarball:   https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.19.tar.gz
+           sha256 7fa616e3046edfa7a28a32d5f9eacfd23f92900fe1f8ccd988c1662f30454562
+License:   MIT (LICENSE)
+
+Files taken verbatim from the tarball (sha256):
+  298581a04a36c0165da4b0aade235c23088cb2faa58651d720ea2f3706ed0b0d  cJSON.c
+  25b0145150d500498e4d209cec69c18c42cf818bffcc54690be3b895a2a16dee  cJSON.h
+  a36dda207c36db5818729c54e7ad4e8b0c6fba847491ba64f372c1a2037b6d5c  LICENSE
+
+Why 1.7.19, not Debian trixie's 1.7.18: trixie ships 1.7.18 plus backported
+fixes (CVE-2023-26819, number parsing; CVE-2025-57052, cJSON_Utils only).
+1.7.19 is the upstream release that contains them, plus a recursion limit in
+cJSON_Duplicate, which the updatedInput builder uses.
+
+Check: sha256sum -c <(sed -n 's/^  \([0-9a-f]\{64\}\)  /\1  /p' README)
