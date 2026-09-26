@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-09-26T04:58:33Z
+claimed_by: loadguard-release-manager
+class: standard
+completed: 2026-09-26T04:58:33Z
+created: 2026-09-26T04:47:25Z
+id: 13
+priority: medium
+started: 2026-09-26T04:58:33Z
+status: done
+tags:
+- tests
+title: 'test_confine: test_status_flag scheitert in eingesperrter Session'
+updated: 2026-09-26T04:58:33Z
+---
+
+t/test_confine.py:621 (Entry.test_status_flag) erwartet von --status nur no-claude oder no-bus. Läuft die Suite in einer Session, die schon in loadguard-*.scope steckt (jede seit 0.1.1 live), antwortet confine() zuerst 'already' -> rot. Auch auf sauberem HEAD rot (k4-Worker, 2026-09-26). Test darf nicht von der eigenen Prozess-Abstammung des Test-Runners abhängen: entweder die Umgebung isolieren (bevorzugt, falls confine.py dafür schon eine Naht hat) oder 'already' als gültige Antwort zulassen, mit Begründung im Test.
+
+2026-09-26 04:51 Claim of test_status_flag: --status prints confine()'s status word, exits 0, and running it from inside a claude session never moves the real claude (ancestor of the runner); XDG_RUNTIME_DIR is stripped so the no-bus gate stops it before busctl. Reproduced red: b'already\n' from a session in app-loadguard.slice/loadguard-7085681a-2882634.scope. 'already' returns at confine.py:300, before linger/bus/busctl -> also a non-moving answer. Seam check: the entry calls confine(session_id) with start=getppid(), root='' - no ancestry/root seam; LOADGUARD_CONFINE=0 would make it deterministic ('disabled') but skips find_claude on the real /proc, the only run of that walk against the live tree - loses coverage. Decision: accept already with a comment; the words that mean a move was tried (attached, start-failed, unconfirmed) stay rejected.
+
+2026-09-26 04:52 Also found (not fixed, outside ancestry): on another host the same test can go red with other non-moving words that return before no-bus - no-linger (claude above the runner, not confined, no linger for the user; checked before the bus) and no-cgroup-v2 (cgroup v1 host). reuben has linger and v2, so not hit here. Widening the tuple would cover them; left for whoever routes the card.
+
+2026-09-26 04:52 Done: t/test_confine.py Entry.test_status_flag now also accepts b'already\n', with a comment why: every accepted word returns before busctl, so the real claude is not moved; a tried move answers attached/start-failed/unconfirmed and stays red. No production change, no CHANGELOG entry (test-only). Verified: nice python3 -m unittest discover -s t -v -> Ran 162 tests, OK, none skipped (run from a session in loadguard-7085681a-2882634.scope, where it was red before).
+
+2026-09-26 04:55 Per coordinator: whitelist extended by no-linger and no-cgroup-v2 (explicit list, no inversion), comment +1 line. Verified in confine.py: 'no-cgroup-v2' returns at :299, 'no-linger' at :303; subprocess (busctl) only in start_scope :236 and attach :245, first reached at :319; the checks before only read files and call pwd.getpwuid. nice python3 -m unittest discover -s t -> 162 tests OK, none skipped. Stays in review.
+
+2026-09-26 04:58 Committed as ac044f7: Accept every non-moving --status answer in test_status_flag (k13). Test-only change, no CHANGELOG entry. Verified: nice python3 -m unittest discover -s t -> 162 tests, OK, none skipped.
