@@ -283,6 +283,12 @@ Umgesetzt (k6, `src/loadguard-hook.c`, `hooks/hooks.json`; Tests
   ~0,6 ms; Claudes erste Antwort wartet ohnehin auf die SessionStart-Hooks.
   Timeout 5 s wie PreToolUse (Default auf UserPromptSubmit: 30 s; ein
   Timeout verwirft die Ausgabe, der Prompt geht ohne Zeile durch).
+- **Live bestätigt** (2026-09-26, `claude -p --plugin-dir` mit Haiku,
+  `LOADGUARD_PSI_FULL=1 LOADGUARD_SWAP_USED=1`, Claude Code 2.1.283): Die
+  Zeile kommt über SessionStart und UserPromptSubmit beim Modell an, es
+  zitiert beide wörtlich. `make test` verweigert der Hook; das Modell sieht
+  das als fehlgeschlagenen Tool-Aufruf `PreToolUse:Bash hook error: <Grund>`
+  (`is_error`) und gibt den Grund korrekt wieder. Kosten 0,02 $.
 - **Nie exit 2:** Auf UserPromptSubmit blockiert exit 2 den Prompt und löscht
   ihn. Jeder Pfad endet mit exit 0; Test: Produktions-Binary direkt und über
   den Starter, gültige, kaputte, leere und zu große Payloads, drei
