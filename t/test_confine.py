@@ -618,7 +618,15 @@ class Entry(unittest.TestCase):
     def test_status_flag(self):
         proc = self.run_entry(b'{"session_id": "abc"}', ["--status"])
         self.assertEqual(proc.returncode, 0)
-        self.assertIn(proc.stdout, (b"no-claude\n", b"no-bus\n"))
+        # Every answer here returns before busctl, so the real claude stays
+        # where it is: no claude above the runner, claude not yet confined
+        # (stopped by the stripped XDG_RUNTIME_DIR), or claude already in a
+        # loadguard scope, as every session since 0.1.1 is (k13). On other
+        # hosts also no linger for the user, or no cgroup v2 at all.
+        # A tried move answers attached, start-failed or unconfirmed.
+        self.assertIn(proc.stdout, (b"no-claude\n", b"no-bus\n",
+                                    b"already\n", b"no-linger\n",
+                                    b"no-cgroup-v2\n"))
 
     def test_broken_lib_still_exits_0(self):
         with tempfile.TemporaryDirectory() as tmp:
