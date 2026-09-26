@@ -1,27 +1,22 @@
-"""Stage 0: the PreToolUse hook is a fail-open pass-through.
+"""The PreToolUse entry: hooks/loadguard, a sh starter, and its wiring.
 
-Feeds every fixture in t/fixtures/ to hooks/loadguard as a subprocess, the way
-Claude Code runs it, and asserts: exit 0, nothing on stdout (= no decision,
-normal permission flow), within a generous wall-clock budget.
+Without a built binary the starter is the whole hook and must pass every
+payload through: exit 0, nothing on stdout (= no decision, normal permission
+flow). With a binary it hands stdin over by exec. The compiled hook itself is
+tested in test_hook_binary.py, its build in test_build.py.
 """
 
-import importlib.machinery
-import importlib.util
 import json
 import os
 import subprocess
-import sys
-import time
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hooks", "loadguard")
 FIXTURES = os.path.join(ROOT, "t", "fixtures")
 
-# Wall-clock per hook run, Python startup included. The design target is
-# < 30 ms of hook work; interpreter startup alone measured 35-140 ms on
-# reuben under load 5-9, so this only catches hangs and gross regressions.
-# Must stay far below the 5 s timeout in hooks/hooks.json.
+# Wall-clock per run; only catches hangs. Far below the 5 s hook timeout.
 BUDGET_S = 1.0
 
 
@@ -29,27 +24,23 @@ def fixture_names():
     return sorted(f for f in os.listdir(FIXTURES) if f.endswith(".json"))
 
 
-def run_hook(stdin_bytes):
-    start = time.perf_counter()
-    proc = subprocess.run(
-        [HOOK], input=stdin_bytes, capture_output=True, timeout=10, cwd=ROOT
-    )
-    return proc, time.perf_counter() - start
+def read_fixture(name):
+    with open(os.path.join(FIXTURES, name), "rb") as f:
+        return f.read()
 
 
-def load_hook_module():
-    loader = importlib.machinery.SourceFileLoader("loadguard_hook", HOOK)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    saved, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-    try:
-        loader.exec_module(module)  # no __pycache__ inside hooks/
-    finally:
-        sys.dont_write_bytecode = saved
-    return module
+def run_starter(args, stdin=b"", env=None):
+    env = {"PATH": os.environ["PATH"]} if env is None else env
+    return subprocess.run([HOOK, *args], input=stdin, capture_output=True,
+                          timeout=10, cwd=ROOT, env=env)
 
 
-class HookPassThrough(unittest.TestCase):
+class StarterWithoutBinary(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = tmp.name  # exists, but holds no bin/loadguard-hook
+
     def test_fixtures_present(self):
         names = fixture_names()
         for required in ("bash-plain.json", "bash-heredoc.json",
@@ -58,61 +49,78 @@ class HookPassThrough(unittest.TestCase):
             self.assertIn(required, names)
 
     def test_every_fixture_passes_through_silently(self):
-        for name in fixture_names():
-            with self.subTest(fixture=name):
-                with open(os.path.join(FIXTURES, name), "rb") as f:
-                    proc, elapsed = run_hook(f.read())
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout, b"")
-                self.assertLess(elapsed, BUDGET_S)
+        cases = {"empty data dir": [self.data],
+                 "missing data dir": [os.path.join(self.data, "nope")],
+                 "empty argument": [""],
+                 "no argument, no env": []}
+        for case, args in cases.items():
+            for name in fixture_names():
+                with self.subTest(case=case, fixture=name):
+                    proc = run_starter(args, read_fixture(name))
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(proc.stdout, b"")
+                    self.assertEqual(proc.stderr, b"")
 
     def test_closed_stdin(self):
-        proc = subprocess.run([HOOK], stdin=subprocess.DEVNULL,
+        proc = subprocess.run([HOOK, self.data], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=10)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, b"")
 
-    def test_errors_are_reported_on_stderr_only(self):
-        with open(os.path.join(FIXTURES, "broken.json"), "rb") as f:
-            proc, _ = run_hook(f.read())
-        self.assertEqual(proc.stdout, b"")
-        self.assertIn(b"loadguard: pass-through", proc.stderr)
+    def test_non_executable_binary_is_ignored(self):
+        os.mkdir(os.path.join(self.data, "bin"))
+        path = os.path.join(self.data, "bin", "loadguard-hook")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\necho SHOULD-NOT-RUN\n")
+        os.chmod(path, 0o644)
+        proc = run_starter([self.data], read_fixture("bash-plain.json"))
+        self.assertEqual((proc.returncode, proc.stdout), (0, b""))
 
-    def test_valid_payloads_are_quiet_on_stderr(self):
-        for name in ("bash-plain.json", "bash-heredoc.json", "read-tool.json"):
-            with self.subTest(fixture=name):
-                with open(os.path.join(FIXTURES, name), "rb") as f:
-                    proc, _ = run_hook(f.read())
-                self.assertEqual(proc.stderr, b"")
-
-    def test_hook_is_executable(self):
+    def test_starter_is_executable_posix_sh(self):
         self.assertTrue(os.access(HOOK, os.X_OK))
-
-    def test_hook_spawns_no_subprocess(self):
         with open(HOOK, encoding="utf-8") as f:
-            source = f.read()
-        for forbidden in ("subprocess", "os.system", "os.popen", "os.exec",
-                          "os.spawn", "os.fork"):
-            self.assertNotIn(forbidden, source)
+            self.assertEqual(f.readline(), "#!/bin/sh\n")
+
+
+class StarterWithBinary(unittest.TestCase):
+    """A stand-in binary echoes its stdin: the starter passes it on untouched."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = tmp.name
+        os.mkdir(os.path.join(self.data, "bin"))
+        path = os.path.join(self.data, "bin", "loadguard-hook")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\necho \"pid $$\" >&2\nexec cat\n")
+        os.chmod(path, 0o755)
+
+    def assert_handed_over(self, proc, stdin):
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, stdin)
+
+    def test_data_dir_as_argument(self):
+        stdin = read_fixture("bash-heredoc.json")
+        self.assert_handed_over(run_starter([self.data], stdin), stdin)
+
+    def test_data_dir_from_environment(self):
+        stdin = read_fixture("bash-plain.json")
+        env = {"PATH": os.environ["PATH"], "CLAUDE_PLUGIN_DATA": self.data}
+        self.assert_handed_over(run_starter([], stdin, env), stdin)
+
+    def test_exec_keeps_the_pid(self):
+        # exec, not fork: the binary runs as the starter's own process.
+        proc = subprocess.Popen([HOOK, self.data], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _, err = proc.communicate(timeout=10)
+        self.assertEqual(err.decode().strip(), "pid %d" % proc.pid)
 
 
 class PayloadFields(unittest.TestCase):
-    """Pins the field names read from the documented PreToolUse payload."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.hook = load_hook_module()
+    """Pins the field names of the documented PreToolUse payload."""
 
     def payload(self, name):
-        with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
-            return json.load(f)
-
-    def test_bash_command_extracted(self):
-        self.assertEqual(self.hook.bash_command(self.payload("bash-plain.json")),
-                         "pwd")
-        heredoc = self.hook.bash_command(self.payload("bash-heredoc.json"))
-        self.assertIn("<<'EOF'\n", heredoc)
-        self.assertIn('"double"', heredoc)
+        return json.loads(read_fixture(name))
 
     def test_documented_fields_in_fixtures(self):
         for name in ("bash-plain.json", "bash-heredoc.json",
@@ -137,35 +145,49 @@ class PayloadFields(unittest.TestCase):
                          {"command": "echo LOADGUARD_BG",
                           "run_in_background": True})
 
-    def test_non_bash_and_malformed_yield_none(self):
-        self.assertIsNone(self.hook.bash_command(self.payload("read-tool.json")))
-        self.assertIsNone(self.hook.bash_command(self.payload("bash-no-command.json")))
-        self.assertIsNone(self.hook.bash_command(["Bash", "ls"]))
-        self.assertIsNone(self.hook.bash_command({"tool_name": "Bash",
-                                                  "tool_input": None}))
-
 
 class PluginWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "hooks", "hooks.json")) as f:
+            cls.hooks = json.load(f)["hooks"]
+
     def test_manifest(self):
         with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as f:
             manifest = json.load(f)
         self.assertEqual(manifest["name"], "loadguard")
         self.assertIn("version", manifest)
 
-    def test_hooks_json(self):
-        with open(os.path.join(ROOT, "hooks", "hooks.json")) as f:
-            hooks = json.load(f)["hooks"]
-        self.assertEqual(list(hooks), ["PreToolUse"])
-        (entry,) = hooks["PreToolUse"]
+    def test_events(self):
+        self.assertEqual(sorted(self.hooks), ["PreToolUse", "SessionStart"])
+
+    def test_pre_tool_use_runs_the_starter(self):
+        (entry,) = self.hooks["PreToolUse"]
         self.assertEqual(entry["matcher"], "Bash")
         (hook,) = entry["hooks"]
         self.assertEqual(hook["type"], "command")
+        # Exec form (args set): no shell between Claude Code and the starter.
+        # Without args support it degrades to shell form and the starter
+        # reads $CLAUDE_PLUGIN_DATA from the environment instead.
         self.assertEqual(hook["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard")
+        self.assertEqual(hook["args"], ["${CLAUDE_PLUGIN_DATA}"])
+        self.assertNotIn("async", hook)
         # Seconds. Short, so a hang costs one Bash call at most 5 s instead of
         # the 600 s default; on timeout Claude Code drops the hook and runs
         # the command (fail open).
         self.assertLessEqual(hook["timeout"], 5)
         self.assertGreater(hook["timeout"], BUDGET_S)
+
+    def test_session_start_builds_in_the_background(self):
+        (entry,) = self.hooks["SessionStart"]
+        self.assertNotIn("matcher", entry)
+        (hook,) = entry["hooks"]
+        self.assertEqual(hook["command"],
+                         "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-build")
+        self.assertEqual(hook["args"], ["${CLAUDE_PLUGIN_DATA}"])
+        self.assertIs(hook["async"], True)
+        self.assertTrue(os.access(os.path.join(ROOT, "hooks", "loadguard-build"),
+                                  os.X_OK))
 
 
 if __name__ == "__main__":

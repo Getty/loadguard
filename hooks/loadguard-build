@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# loadguard — SessionStart hook: build the C hook if it is missing or stale.
+#
+#   loadguard-build [DATA_DIR]               detach, build in the background
+#   loadguard-build --foreground DATA_DIR    build now, print the status
+#
+# DATA_DIR defaults to $CLAUDE_PLUGIN_DATA; the binary lands in DATA_DIR/bin.
+# As a hook it forks a detached child (own session, stdio on /dev/null,
+# nice 10) and exits 0 at once: the session never waits for gcc, and a
+# `claude -p` teardown does not kill the build. It prints nothing — zero
+# context cost. Without a compiler it does nothing; see lib/loadguard/build.py.
+
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def build(data_dir):
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    from loadguard.build import ensure
+    return ensure(ROOT, data_dir)
+
+
+def foreground(argv):
+    if len(argv) != 3:
+        sys.exit("usage: loadguard-build --foreground DATA_DIR")
+    status = build(argv[2])
+    print(status)
+    return 1 if status == "failed" else 0
+
+
+def hook(argv):
+    data_dir = (argv[1] if len(argv) > 1 else "") or \
+        os.environ.get("CLAUDE_PLUGIN_DATA", "")
+    if not data_dir or os.fork() > 0:
+        return
+    try:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        os.nice(10)
+        build(data_dir)
+    finally:
+        os._exit(0)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--foreground"]:
+        sys.exit(foreground(sys.argv))
+    try:
+        hook(sys.argv)
+    except BaseException:  # noqa: BLE001 — never fail a session start
+        pass
+    sys.exit(0)

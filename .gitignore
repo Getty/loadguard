@@ -5,3 +5,6 @@ __pycache__/
 # karr materialized task view -- never commit
 tasks/
 config.yml
+
+# local build (make)
+build/

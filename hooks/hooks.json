@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-build",
+            "args": ["${CLAUDE_PLUGIN_DATA}"],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -7,6 +20,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard",
+            "args": ["${CLAUDE_PLUGIN_DATA}"],
             "timeout": 5
           }
         ]

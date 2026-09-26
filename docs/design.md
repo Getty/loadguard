@@ -135,7 +135,7 @@ Gemessen (k1): Ein Python-Hook kostet auf reuben im Median 183 ms, p90 346 ms �
 nur Interpreter-Start. Daher:
 
 - **Hook-Pfad in C** (Payload lesen, `/proc` messen, einwickeln, entscheiden). JSON
-  über **vendored cJSON** (`vendor/cJSON.{c,h}`, MIT) — kein handgebautes Parsen, keine
+  über **vendored cJSON** (`vendor/cJSON/`, v1.7.19, MIT) — kein handgebautes Parsen, keine
   `-dev`-Pakete auf dem Zielhost, nur ein C-Compiler.
 - **CLI (`status`/`doctor`/`explain`) und Tests bleiben Python** (stdlib). `explain`
   ruft das Binary, damit die Entscheidungslogik genau einmal existiert.
@@ -143,3 +143,24 @@ nur Interpreter-Start. Daher:
 - **Build beim ersten Lauf** auf dem Zielhost. Solange kein Binary da ist (kein
   Compiler, Build läuft noch, Build fehlgeschlagen): **fail-open Pass-through**.
   Der Build darf nie einen Bash-Aufruf blockieren.
+
+Umgesetzt (k8):
+
+- **Build-Ort `${CLAUDE_PLUGIN_DATA}/bin/loadguard-hook`** — laut
+  plugins-reference `~/.claude/plugins/data/<id>/`, bleibt über Plugin-Updates
+  erhalten; `${CLAUDE_PLUGIN_ROOT}` wechselt mit jeder Version. Veraltet heißt:
+  der Stempel neben dem Binary (SHA-256 über Quellen, Flags, Compiler-Pfad/-Größe/
+  -mtime) passt nicht mehr — ein Update mit geänderten Quellen baut neu, bloß
+  kopierte Dateien mit neuer mtime nicht.
+- **SessionStart** (`hooks/loadguard-build`, `async`) forkt ein abgelöstes Kind
+  (eigene Session, stdio auf `/dev/null`, `nice 10`), das unter `flock` atomar baut
+  (temp + rename, 120 s Timeout). Ohne Compiler nichts; Build fehlgeschlagen →
+  altes Binary weg → Pass-through. Abgelöst, weil `claude -p` async-Hooks beim
+  Beenden killt — sonst würde bei reinen Headless-Sessions nie fertig gebaut.
+- **PreToolUse** startet den sh-Starter `hooks/loadguard` in Exec-Form
+  (`args: ["${CLAUDE_PLUGIN_DATA}"]`): Binary da → `exec`, sonst `exit 0`. Das
+  Binary direkt einzutragen spart ~2 ms, gäbe aber bis zum ersten Build (und
+  ohne Compiler für immer) bei jedem Bash-Aufruf eine sichtbare
+  Hook-Fehlermeldung (exit 127).
+- **Der Python-Hook ist gelöscht**: ohne Binary ist Pass-through genau
+  `exit 0`, dafür braucht es keinen Interpreter für 83–183 ms.

@@ -1,1 +1,1 @@
-"""loadguard — shared code for the hook (hooks/loadguard) and the CLI (bin/loadguard)."""
+"""loadguard — shared Python code for the CLI (bin/loadguard), the hook build and the tests."""
