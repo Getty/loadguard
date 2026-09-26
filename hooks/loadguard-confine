@@ -3,11 +3,15 @@
 #
 # Moves the claude or codex process (k11) that runs this hook into a
 # transient systemd user scope with memory/CPU limits; see
-# lib/loadguard/confine.py. Prints nothing (zero context cost) and exits 0
-# whatever happens: the session always starts, confined or not.
+# lib/loadguard/confine.py. Then, once the session is in its scope, starts
+# the scope's watcher for the learned list (k15), the hook binary from
+# $CLAUDE_PLUGIN_DATA/bin detached; see lib/loadguard/learn.py. Prints
+# nothing (zero context cost) and exits 0 whatever happens: the session
+# always starts, confined or not.
 #
 #   loadguard-confine            as a hook: payload on stdin
-#   loadguard-confine --status   same, print the status word (for debugging)
+#   loadguard-confine --status   same, print confine's status word (for
+#                                debugging)
 
 import json
 import os
@@ -28,6 +32,9 @@ def main(argv):
     status = confine(session_id if isinstance(session_id, str) else None)
     if argv[1:2] == ["--status"]:
         print(status)
+        sys.stdout.flush()
+    from loadguard.learn import start_watcher
+    start_watcher(status, os.environ.get("CLAUDE_PLUGIN_DATA", ""))
 
 
 if __name__ == "__main__":

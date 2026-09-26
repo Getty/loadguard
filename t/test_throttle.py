@@ -39,6 +39,8 @@ from loadguard import build  # noqa: E402
 from loadguard.snapshot import parse_incident  # noqa: E402
 
 HOME = "/home/getty"
+# No learned list (k15) unless a test writes one: never the developer's.
+NO_STATE = "/nonexistent/loadguard-state"
 SLICE_CGROUP = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
                 "app-loadguard.slice/loadguard-00000000-9000.scope")
 BIN = {}
@@ -94,8 +96,10 @@ def codex_payload(name, command=None, **fields):
 
 
 def base_env(**extra):
-    """No LOADGUARD_* from the developer's shell leaks into a test."""
-    env = {"PATH": os.environ["PATH"], "HOME": HOME}
+    """No LOADGUARD_* from the developer's shell leaks into a test, and no
+    learned list from ~/.local/state."""
+    env = {"PATH": os.environ["PATH"], "HOME": HOME,
+           "XDG_STATE_HOME": NO_STATE}
     env.update(extra)
     return env
 
@@ -811,7 +815,10 @@ class Report(Tree):
             "limits": {"psi_full": 10, "swap_used": 90, "slots": 2},
             "pressure": {"full": 0, "some": 0.31, "swap": 60, "zram": 97},
             "pressured": False, "slots": {"busy": 0, "holders": []},
-            "refuse_heavy": False})
+            "refuse_heavy": False,
+            "learn": {"on": True,
+                      "file": NO_STATE + "/loadguard/learned.jsonl",
+                      "state": "none", "entries": 0, "rss_limit": 20}})
 
     def test_status_under_pressure_scans_nothing(self):
         # As in the hook: a FIFO as cmdline would block any reader.
@@ -1348,7 +1355,7 @@ class LiveHost(unittest.TestCase):
         self.assertEqual((doc["report"], doc["mode"]), (1, "status"))
         self.assertEqual(set(doc), {
             "report", "mode", "throttle", "ignored", "limits", "pressure",
-            "pressured", "slots", "refuse_heavy"})
+            "pressured", "slots", "refuse_heavy", "learn"})
         sys.stderr.write("[--report n=20: median %.2f ms] "
                          % statistics.median(times))
         proc = run([BIN["hook"], "--explain"], payload("git status"))

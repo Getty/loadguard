@@ -72,6 +72,34 @@ The model sent `description` and `timeout`; `updatedInput` carried only `command
 
 Asserted by `t/test_updated_input.py`.
 
+## `shells/` — recorded, the shell behind a Bash call (k15)
+
+`claude-code.json`: ten Bash tool calls of a Claude Code 2.1.283 session on
+reuben, 2026-09-27, each ending in a script that copied its parent's
+`/proc/<pid>/cmdline` — the wrapper shell Claude Code runs the call in
+(read-only, no load; the calls were `sleep`, `echo`, `printf`, `cat`).
+`command` is `tool_input.command` as sent, `argv` the wrapper's argv,
+verbatim (snapshot path and scratch paths of that session included).
+
+argv[0..1] `/bin/bash`, `-c`; argv[2]:
+
+    source <snapshot> 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '<command>' < /dev/null && pwd -P >| /tmp/claude-XXXX-cwd
+
+- A `'` inside the command is written `'"'"'` (not `'\''`).
+- ` < /dev/null` is left out when the command has a heredoc (`heredoc`) or a
+  stdin redirection of its own (`stdin-reader`).
+- Cases: `plain`, `single` (quotes), `double` (`\"`, `\$`), `heredoc`,
+  `cd-backslash-utf8`, `background` (`run_in_background: true`, same form),
+  `ansi-comment-leading-space` (`$'…'`, `!`, a comment, a newline, leading
+  and trailing blanks), `stdin-reader`, `continuation-subst` (`\<newline>`,
+  `$(…)`), `sleep-then`.
+
+`t/test_learn.py` requires the extraction to give back `command` byte for
+byte, and builds its scenario wrappers the same way (`claude_wrapper()`,
+checked against these). The Codex shell comes from
+`procs/codex-session.json` (pid 7203, `/bin/bash -c <command>`); whether its
+argv[2] equals the PreToolUse `tool_input.command` is not yet checked live.
+
 # Measurement fixtures
 
 ## `incidents/` — excerpts of `~/load-incidents/*.txt`

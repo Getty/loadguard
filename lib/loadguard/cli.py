@@ -1,4 +1,4 @@
-"""bin/loadguard: status, doctor, explain (k5).
+"""bin/loadguard: status, doctor, explain (k5); learned, forget (k15).
 
 The decisions exist once, in the C hook (src/loadguard-hook.c). This module
 finds that binary, runs one of its read-only report modes and formats the
@@ -11,7 +11,10 @@ JSON it prints:
 
 Nothing here classifies a command, scans /proc for slots or holds a figure
 against a limit. Stage 1 is Python already: doctor asks confine.py and
-build.py the questions they answer for the SessionStart hooks.
+build.py the questions they answer for the SessionStart hooks. The learned
+list (k15) is data: `learned` shows it and `forget` trims it through
+learn.py, under the lock the watchers take; whether the hook matches a
+command against it, `explain` asks the binary.
 
 Which binary: $CLAUDE_PLUGIN_DATA/bin if set (hooks get it; the Bash tool
 does not). Else, for a copy installed from a marketplace, which lives in
@@ -33,7 +36,7 @@ import re
 import subprocess
 import sys
 
-from . import build, confine
+from . import build, confine, learn
 
 NAME = "loadguard"
 REPORT_FORMAT = 1
@@ -181,7 +184,8 @@ def ignored_lines(names, environ):
     lines = []
     for name in names:
         value = environ.get(name, "")
-        if name in ("LOADGUARD_THROTTLE", "LOADGUARD_CONFINE"):
+        if name in ("LOADGUARD_THROTTLE", "LOADGUARD_CONFINE",
+                    "LOADGUARD_LEARN"):
             lines.append("%s=%r changes nothing: only 0 turns it off"
                          % (name, value))
         else:
@@ -215,8 +219,8 @@ def format_explain(doc, environ):
     if not doc["throttle"]:
         lines += rows("heavy", ["not checked: LOADGUARD_THROTTLE=0"])
     elif doc["heavy"] is None:
-        lines += rows("heavy", ["no: a light command is never refused; the "
-                                "hook reads nothing for it"])
+        lines += rows("heavy", ["no: no heavy pattern, not learned; a light "
+                                "command is never refused"])
     else:
         lines += rows("heavy", ["yes (%s)" % doc["heavy"]])
         lines += rows("memory", [memory(doc)]) + rows("slots", slot_lines(doc))
@@ -266,6 +270,91 @@ def explain(root, environ, command):
         print("\n".join(rows("hook", [str(e), "see `loadguard doctor`"])))
         return 1
     print("\n".join(format_explain(doc, environ)))
+    return 0
+
+
+# --- learned, forget (k15) -----------------------------------------------------
+
+def shown(text):
+    r"""One line of ASCII: a backslash doubled, controls as \n, \t or
+    \xNN, other non-ASCII backslash-escaped."""
+    text = text.replace("\\", "\\\\").replace("\n", "\\n").replace(
+        "\t", "\\t")
+    text = re.sub(r"[\x00-\x1f\x7f]", lambda m: "\\x%02x" % ord(m.group()),
+                  text)
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def home_short(path, environ):
+    home = environ.get("HOME", "")
+    if len(home) > 1 and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+def entry_lines(n, entry, environ):
+    peak = entry.get("peak_rss")
+    last = entry.get("last_seen")
+    head = "%3d  %s  last %s" % (
+        n, size(peak) if isinstance(peak, (int, float)) and peak > 0
+        else "? MiB",
+        shown(last[:10]) if isinstance(last, str) else "?")
+    if isinstance(entry.get("cwd"), str) and entry["cwd"]:
+        head += "  in " + shown(home_short(entry["cwd"], environ))
+    return [head, "     " + shown(entry["command"])]
+
+
+def learned(environ):
+    path = learn.list_path(environ)
+    if path is None:
+        print("learned: no list: neither $XDG_STATE_HOME nor $HOME is an "
+              "absolute path")
+        return 1
+    entries, problem = learn.read(path)
+    lines = []
+    if learn.disabled(environ):
+        lines.append("learning is off (LOADGUARD_LEARN=0): the hook ignores "
+                     "this list")
+    if problem == "too-large":
+        lines.append("%s is larger than %d bytes: the hook ignores it; "
+                     "`loadguard forget --all` clears it"
+                     % (path, learn.MAX_BYTES))
+    elif problem is not None:
+        lines.append("%s cannot be read: %s" % (path, problem))
+    elif not entries:
+        lines.append("no learned commands (%s)" % path)
+    else:
+        lines.append("%d learned command%s in %s; each exact text is heavy:"
+                     % (len(entries), "" if len(entries) == 1 else "s", path))
+        for n, entry in enumerate(entries, 1):
+            lines += entry_lines(n, entry, environ)
+    print("\n".join(lines))
+    return 1 if problem else 0
+
+
+def forget(environ, args):
+    path = learn.list_path(environ)
+    if path is None:
+        print("forget: no list: neither $XDG_STATE_HOME nor $HOME is an "
+              "absolute path")
+        return 1
+    if args == ["--all"]:
+        numbers = None
+    elif all(re.fullmatch(r"[1-9][0-9]{0,5}", a) for a in args):
+        numbers = sorted({int(a) for a in args})
+    else:
+        sys.stderr.write(USAGE + "\n")
+        return 2
+    try:
+        dropped = learn.forget(path, numbers)
+    except (ValueError, OSError) as e:
+        print("forget: %s; nothing changed" % (
+            e if isinstance(e, ValueError) else e.strerror or e))
+        return 1
+    if not dropped:
+        print("nothing to forget (%s)" % path)
+    for entry in dropped:
+        print("forgot: " + shown(entry["command"]))
     return 0
 
 
@@ -406,6 +495,51 @@ def stage23(root, environ):
     return "stage 2/3, refuse heavy commands: " + header, out, doc
 
 
+def learning(environ, doc, proc_root, start):
+    """(header, rows): the learned list as the hook reads it and this
+    session's watcher (k15)."""
+    if doc is None:
+        return ("learning, heavy by what ran: unknown",
+                [("--", "the hook binary answers this (above)", None)])
+    lrn = doc["learn"]
+    if not lrn["on"]:
+        return ("learning, heavy by what ran: off (LOADGUARD_LEARN=0)",
+                [("--", "no watcher, the list is ignored", None)])
+    out = []
+    state, where = lrn["state"], lrn["file"]
+    if where is None:
+        out.append(("FAIL", "no list: neither $XDG_STATE_HOME nor $HOME is "
+                    "an absolute path", None))
+    elif state == "ok":
+        out.append(("ok", "%d learned command%s in %s" % (
+            lrn["entries"], "" if lrn["entries"] == 1 else "s", where),
+            None))
+    elif state == "none":
+        out.append(("ok", "no learned commands yet (%s)" % where, None))
+    else:
+        out.append(("FAIL", "%s is %s: the hook ignores it" % (
+            where, "too large" if state == "too-large" else "unreadable"),
+            "loadguard forget --all"))
+    try:
+        total = confine.mem_total(proc_root)
+    except OSError:
+        total = None
+    out.append(("ok", "a command is learned at %d%% of MemTotal%s" % (
+        lrn["rss_limit"], " (%s)" % size(total * lrn["rss_limit"] // 100)
+        if total else ""), None))
+    scope = scope_of(session(proc_root, start)[1])
+    if scope is None:
+        out.append(("--", "no watcher: this session is not confined", None))
+    else:
+        found = learn.watcher(environ, scope, proc_root)
+        out.append(("ok", "watcher of this session: pid %d" % found, None)
+                   if found else (
+            "FAIL", "no watcher for this session",
+            "it starts with the session once the hook binary exists; "
+            "start a new session"))
+    return "learning, heavy by what ran: on", out
+
+
 def doctor_sections(root, environ, proc_root="", uid=None, me=None,
                     start=None):
     """[(title, [(status, text, hint)])]; a FAIL means exit 1."""
@@ -414,6 +548,7 @@ def doctor_sections(root, environ, proc_root="", uid=None, me=None,
     sections = [stage1(environ, proc_root, uid, me, start)]
     header, out, doc = stage23(root, environ)
     sections.append((header, out))
+    sections.append(learning(environ, doc, proc_root, start))
     names = (doc["ignored"] if doc else []) + confine_ignored(environ)
     if names:
         sections.append(("environment", [
@@ -437,11 +572,15 @@ def doctor(root, environ, **where):
     return 1 if fails else 0
 
 
-USAGE = """usage: loadguard status | doctor | explain '<command>'
+USAGE = """usage: loadguard status | doctor | explain '<command>' | learned
+                 | forget <n>... | forget --all
   status    memory pressure, heavy slots and who holds them, as the hook
             sees them
   doctor    can loadguard work here? exit 1 if something is broken
-  explain   what the hook would do with this Bash command now (dry run)"""
+  explain   what the hook would do with this Bash command now (dry run)
+  learned   commands that once took a lot of memory: their exact text is
+            heavy from then on
+  forget    drop learned commands by their number in `learned`, or all"""
 
 
 def main(argv, root, environ=None):
@@ -455,5 +594,9 @@ def main(argv, root, environ=None):
         return doctor(root, environ)
     if argv[:1] == ["explain"] and len(argv) > 1:
         return explain(root, environ, " ".join(argv[1:]))
+    if argv == ["learned"]:
+        return learned(environ)
+    if argv[:1] == ["forget"] and len(argv) > 1:
+        return forget(environ, argv[1:])
     sys.stderr.write(USAGE + "\n")
     return 2

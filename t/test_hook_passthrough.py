@@ -6,6 +6,7 @@ flow). With a binary it hands stdin over by exec. The compiled hook itself is
 tested in test_hook_binary.py, its build in test_build.py.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -270,6 +271,16 @@ class PluginWiring(unittest.TestCase):
         self.assertEqual(sorted(self.hooks),
                          ["PreToolUse", "SessionStart", "UserPromptSubmit"])
 
+    def test_hooks_json_unchanged(self):
+        # Codex asks the user to trust the hooks again whenever hooks.json
+        # changes (codex-rs hooks/src/engine/discovery.rs:676-725): k15 added
+        # the watcher without touching it. Change it only on purpose, then
+        # update this hash (the file as of k6).
+        with open(os.path.join(ROOT, "hooks", "hooks.json"), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(),
+                             "d2e0dc4f9bfa7548a4cace9cf90b82ad7c52bcc408bce8e9"
+                             "8314eac3a1ac663b")
+
     def assert_starter(self, hook):
         self.assertEqual(hook["type"], "command")
         # Exec form (args set): no shell between Claude Code and the starter.
@@ -355,6 +366,14 @@ class CodexRuns(unittest.TestCase):
         "'confined'), 'w') as f:\n"
         "        f.write(str(session_id))\n"
         "    return 'stub'\n")
+    # k15: the watcher's start gets confine's status and the data dir, which
+    # the confine entry (no args) reads from $CLAUDE_PLUGIN_DATA.
+    STUB_LEARN = (
+        "import os\n"
+        "def start_watcher(status, data_dir):\n"
+        "    with open(os.path.join(data_dir, 'watched'), 'w') as f:\n"
+        "        f.write(status)\n"
+        "    return 'stub'\n")
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -368,7 +387,8 @@ class CodexRuns(unittest.TestCase):
         lib = os.path.join(self.root, "lib", "loadguard")
         os.makedirs(lib)
         for name, text in (("__init__.py", ""), ("build.py", self.STUB_BUILD),
-                           ("confine.py", self.STUB_CONFINE)):
+                           ("confine.py", self.STUB_CONFINE),
+                           ("learn.py", self.STUB_LEARN)):
             with open(os.path.join(lib, name), "w") as f:
                 f.write(text)
         # A stand-in hook binary that echoes its stdin.
@@ -433,6 +453,10 @@ class CodexRuns(unittest.TestCase):
                     self.assertEqual(got, self.root + "\n" + self.data)
                 else:
                     self.assertEqual(got, json.loads(stdin)["session_id"])
+                    watched = os.path.join(self.data, "watched")
+                    with open(watched) as f:
+                        self.assertEqual(f.read(), "stub")
+                    os.remove(watched)
         self.assertEqual(seen, {"loadguard", "loadguard-build",
                                 "loadguard-confine"})
 

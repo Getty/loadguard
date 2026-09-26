@@ -31,8 +31,9 @@ sys.path.insert(0, HERE)
 CLI = os.path.join(ROOT, "bin", "loadguard")
 
 from loadguard import build, cli  # noqa: E402
-from test_throttle import (CALM, HOME, SLICE_CGROUP, THRASH,  # noqa: E402
-                           add_process, add_scenario, base_env, payload)
+from test_throttle import (CALM, HOME, NO_STATE, SLICE_CGROUP,  # noqa: E402
+                           THRASH, add_process, add_scenario, base_env,
+                           payload)
 
 BIN = {}
 UID = os.getuid()
@@ -95,7 +96,8 @@ class Case(unittest.TestCase):
         return json.loads(proc.stdout)
 
     def run_cli(self, *argv, **env):
-        environ = {"PATH": os.environ["PATH"], "HOME": HOME}
+        environ = {"PATH": os.environ["PATH"], "HOME": HOME,
+                   "XDG_STATE_HOME": NO_STATE}
         environ.update(env)
         return subprocess.run([CLI] + list(argv), capture_output=True,
                               timeout=60, env=environ, text=True)
@@ -172,8 +174,8 @@ class Explain(Case):
 
     def test_light(self):
         self.assertEqual(self.explain(self.tree(THRASH), "git status"), [
-            "heavy:   no: a light command is never refused; the hook reads "
-            "nothing for it",
+            "heavy:   no: no heavy pattern, not learned; a light command is "
+            "never refused",
             "verdict: allow: the hook stays silent, the command runs"])
 
     def test_heavy_allowed(self):
@@ -292,7 +294,8 @@ class Command(Case):
         proc = self.run_cli("explain", "git", "status",
                             CLAUDE_PLUGIN_DATA=BIN["data"])
         self.assertEqual((proc.returncode, proc.stderr), (0, ""))
-        self.assertTrue(proc.stdout.startswith("heavy:   no: a light"))
+        self.assertTrue(proc.stdout.startswith("heavy:   no: no heavy "
+                                               "pattern, not learned"))
         proc = self.run_cli("explain", "cd x && prove -lr t/",
                             CLAUDE_PLUGIN_DATA=BIN["data"])
         self.assertEqual(proc.returncode, 0)
@@ -350,7 +353,7 @@ class Doctor(Case):
     def host(self, cgroup="0::/user.slice/user-1000.slice/user@1000.service/"
              "app.slice/app-loadguard.slice/" + SCOPE,
              controllers="cpu memory pids", linger=True, bus=True,
-             agent="claude", **env):
+             agent="claude", watcher=True, **env):
         d = self.tmpdir()
         root = os.path.join(d, "root")
         write(os.path.join(root, "proc/sys/kernel/random/boot_id"), "b1\n")
@@ -369,10 +372,18 @@ class Doctor(Case):
         os.makedirs(run)
         if bus:
             write(os.path.join(run, "bus"), "")
+        if watcher:
+            # The learned list's watcher (k15), as --watch leaves it: its
+            # pid in the scope's lock file, its argv `… --watch <claude>`.
+            add_process(root, 4300, 1, "loadguard-hook",
+                        [cli.binary_in(BIN["data"]), "--watch", "4100"],
+                        cgroup, "/")
+            write(os.path.join(run, "loadguard", SCOPE + ".watch"), "4300\n")
         fakebin = os.path.join(d, "fakebin")
         write(os.path.join(fakebin, "busctl"), "#!/bin/sh\nexit 1\n", 0o755)
         environ = {"PATH": fakebin + ":" + os.environ["PATH"], "HOME": HOME,
-                   "XDG_RUNTIME_DIR": run, "CLAUDE_PLUGIN_DATA": BIN["data"]}
+                   "XDG_RUNTIME_DIR": run, "CLAUDE_PLUGIN_DATA": BIN["data"],
+                   "XDG_STATE_HOME": os.path.join(d, "state")}
         environ.update(env)
         return root, environ
 
@@ -386,12 +397,20 @@ class Doctor(Case):
         return rc, out.getvalue(), sections
 
     def test_all_good(self):
-        rc, out, sections = self.doctor(*self.host())
+        root, environ = self.host()
+        rc, out, sections = self.doctor(root, environ)
         self.assertEqual(rc, 0, out)
         self.assertEqual([title for title, _rows in sections], [
             "stage 1, confine sessions: on",
-            "stage 2/3, refuse heavy commands: on"])
+            "stage 2/3, refuse heavy commands: on",
+            "learning, heavy by what ran: on"])
         self.assertNotIn("FAIL", out)
+        self.assertIn("  ok    no learned commands yet (%s)\n"
+                      % os.path.join(environ["XDG_STATE_HOME"], "loadguard",
+                                     "learned.jsonl"), out)
+        self.assertIn("  ok    a command is learned at 20% of MemTotal "
+                      "(1.5 GiB)\n", out)
+        self.assertIn("  ok    watcher of this session: pid 4300\n", out)
         self.assertIn("  ok    limits MemoryHigh 2.3 GiB, MemoryMax 3.1 GiB, "
                       "MemorySwapMax 783 MiB, CPUWeight 50\n", out)
         self.assertIn("  ok    this session: confined in %s\n" % SCOPE, out)
@@ -447,8 +466,11 @@ class Doctor(Case):
         self.assertEqual(rc, 0, out)
         self.assertEqual([title for title, _rows in sections], [
             "stage 1, confine sessions: off (LOADGUARD_CONFINE=0)",
-            "stage 2/3, refuse heavy commands: off (LOADGUARD_THROTTLE=0)"])
+            "stage 2/3, refuse heavy commands: off (LOADGUARD_THROTTLE=0)",
+            "learning, heavy by what ran: on"])
         self.assertIn("  --    no linger for " + USER, out)
+        self.assertIn("  --    no watcher: this session is not confined\n",
+                      out)
 
     def test_ignored_variables(self):
         rc, out, sections = self.doctor(*self.host(
@@ -505,6 +527,62 @@ class Doctor(Case):
         self.assertIn("  --    no C compiler ($CC, cc, gcc): the binary "
                       "cannot be checked against these sources or rebuilt\n",
                       out)
+
+    # The learning section (k15).
+
+    def test_no_watcher_fails(self):
+        rc, out, sections = self.doctor(*self.host(watcher=False))
+        self.assertEqual(rc, 1)
+        self.assertEqual(sections[2][0], "learning, heavy by what ran: on")
+        self.assertIn(("FAIL", "no watcher for this session",
+                       "it starts with the session once the hook binary "
+                       "exists; start a new session"), sections[2][1])
+
+    def test_stale_watcher_file_fails(self):
+        # The pid in the lock file belongs to something else now.
+        root, environ = self.host()
+        write(os.path.join(root, "proc", "4300", "cmdline"), "sleep\x0060\x00")
+        rc, out, _ = self.doctor(root, environ)
+        self.assertIn("  FAIL  no watcher for this session\n", out)
+
+    def test_learning_off(self):
+        rc, out, sections = self.doctor(*self.host(watcher=False,
+                                                   LOADGUARD_LEARN="0"))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sections[2], (
+            "learning, heavy by what ran: off (LOADGUARD_LEARN=0)",
+            [("--", "no watcher, the list is ignored", None)]))
+
+    def test_learned_entries_and_broken_list(self):
+        root, environ = self.host()
+        path = os.path.join(environ["XDG_STATE_HOME"], "loadguard",
+                            "learned.jsonl")
+        write(path, '{"command": "a"}\n{"command": "b"}\n')
+        rc, out, _ = self.doctor(root, environ)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("  ok    2 learned commands in %s\n" % path, out)
+        write(path, "x" * ((1 << 20) + 1))
+        rc, out, _ = self.doctor(root, environ)
+        self.assertEqual(rc, 1)
+        self.assertIn("  FAIL  %s is too large: the hook ignores it\n"
+                      "        -> loadguard forget --all\n" % path, out)
+
+    def test_no_binary_no_learning_answer(self):
+        rc, out, sections = self.doctor(*self.host(
+            CLAUDE_PLUGIN_DATA=self.tmpdir()))
+        self.assertEqual(sections[2], (
+            "learning, heavy by what ran: unknown",
+            [("--", "the hook binary answers this (above)", None)]))
+
+    def test_ignored_learn_variables(self):
+        rc, out, sections = self.doctor(*self.host(
+            LOADGUARD_LEARN="no", LOADGUARD_LEARN_RSS="200"))
+        self.assertEqual(rc, 1)
+        self.assertEqual(sections[-1], ("environment", [
+            ("FAIL", "LOADGUARD_LEARN_RSS='200' is not valid: the default "
+             "applies", None),
+            ("FAIL", "LOADGUARD_LEARN='no' changes nothing: only 0 turns it "
+             "off", None)]))
 
     def test_live_host(self):
         # Read-only; whatever this host is, the answer is a verdict.

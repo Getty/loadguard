@@ -26,13 +26,13 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | `.codex-plugin/plugin.json` | Codex-Manifest, dieselbe `hooks/hooks.json`; gemeinsame Felder per Test gleich |
 | `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build + Lage-Zeile, UserPromptSubmit: Lage-Zeile, PreToolUse auf Bash) |
 | `hooks/loadguard` | sh-Starter für PreToolUse, UserPromptSubmit und SessionStart: `exec` des C-Binarys, ohne Binary `exit 0` |
-| `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits |
+| `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits, startet danach den Beobachter der Lernliste |
 | `hooks/loadguard-build` | SessionStart: baut das Binary nach `${CLAUDE_PLUGIN_DATA}/bin/`, abgekoppelt |
-| `src/loadguard-hook.c` | Hook-Pfad in C (verweigert schwere Befehle unter Druck oder bei vollen Slots, Lage-Zeile nur unter Druck, sonst still; schreibt Befehle nie um; Report-Modi für die CLI) |
+| `src/loadguard-hook.c` | Hook-Pfad in C (verweigert schwere Befehle unter Druck oder bei vollen Slots, Lage-Zeile nur unter Druck, sonst still; schreibt Befehle nie um; Report-Modi für die CLI; `--watch PID`: Beobachter pro Scope, schreibt die Lernliste) |
 | `vendor/cJSON/` | cJSON unverändert, Version und SHA256 in `README` |
 | `Makefile` | `make` → `build/bin/`, `make test`, `make clean` |
-| `bin/loadguard` | CLI (`status`, `doctor`, `explain`) |
-| `lib/loadguard/` | Python für CLI, Build und Tests (`snapshot.py`: Messung, `build.py`: Build/Staleness, `confine.py`: Session-Scope, `cli.py`: CLI-Ausgabe aus den Report-Modi des Binarys) |
+| `bin/loadguard` | CLI (`status`, `doctor`, `explain`, `learned`, `forget`) |
+| `lib/loadguard/` | Python für CLI, Build und Tests (`snapshot.py`: Messung, `build.py`: Build/Staleness, `confine.py`: Session-Scope, `learn.py`: Lernliste lesen/kürzen, Beobachter starten, `cli.py`: CLI-Ausgabe aus den Report-Modi des Binarys) |
 | `t/` | Tests (`python3 -m unittest discover -s t -v`), Fixtures aus `~/load-incidents/` |
 
 Hook-Pfad in C (vendored cJSON, Build beim ersten Lauf, fail-open ohne Binary);

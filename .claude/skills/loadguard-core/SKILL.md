@@ -53,7 +53,8 @@ refuses AI-issued shell commands, and tells the model why. Design and rationale:
    normal path (read `/proc` directly — no `jq`, `ps`, `free`), target < 30 ms.
    The hook path is C with vendored cJSON (Python startup alone costs ~180 ms on
    reuben); CLI and tests are Python stdlib. No binary yet → pass through.
-   A light command reads nothing but stdin. Under memory pressure never read
+   A light command reads stdin and the learned list (k15: one `open`, none
+   there = one failed `open`) — nothing else. Under memory pressure never read
    another process's `/proc/<pid>/cmdline`: it faults swapped pages in and can
    outlast the timeout — which lets the heavy command run.
 3. **Light commands are never refused.** The model must always be able to look
@@ -160,6 +161,38 @@ details and file:line in `docs/design.md` → Codex (k11).
   sandbox's PID namespace. Hooks run only after the user trusts them (per
   handler; a changed hooks.json asks again; `codex exec` cannot grant it).
 
+## Learned list (k15)
+
+Exact `tool_input.command` texts, heavy like a pattern (`K_LEARNED`, holds a
+slot). `${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl`, JSON per
+line (`command`, `peak_rss`, `cwd`, `first_seen`, `last_seen`), ≤ 100
+entries. `LOADGUARD_LEARN=0` → no watcher, list ignored.
+
+- Hook: patterns first, then the list. Read with `O_NONBLOCK` + `fstat`:
+  regular file ≤ 1 MiB, ≤ 256 lines, else empty (fail-open, a FIFO must not
+  block the light path). Never learn what the fixed list calls heavy.
+- Watcher `--watch PID` (PID = the number in the scope name), started
+  detached by `hooks/loadguard-confine` after `attached`/`already`; after
+  `attached` moved into the scope (`AttachProcessesToUnit`: confine leaves
+  the hook chain outside). One per scope (`flock` on
+  `$XDG_RUNTIME_DIR/loadguard/<scope>.watch`), 2 s tick, reads
+  `cgroup.procs` + `stat` + `statm` only; `cmdline` once per call over the
+  limit. Ends when PID is gone or its start time changed — never keeps the
+  scope alive, never spins, prints nothing.
+- Call = topmost `<shell> -c|-lc` under the session process;
+  `shell_command()` serves watcher and slot scan. Claude Code 2.1.283
+  wrapper (recorded, `t/fixtures/shells/`): `… && eval '<cmd>'[ < /dev/null]
+  && pwd -P >| /tmp/claude-XXXX-cwd`, a quote written `'"'"'`; read the word
+  as the shell would, anything else = unknown form, nothing learned. Codex:
+  argv[2] (not yet confirmed live); bash 5.2 execs the last command of
+  `-c`, so a lone Codex command has no shell and is not learned. The watcher picks the form by the
+  session process (claude/codex); an MCP server behind `sh -c` is no call.
+- Writes (watcher, `loadguard forget`): `flock` on `learned.lock`, tmp +
+  `fsync` + `rename`. Write on crossing `LOADGUARD_LEARN_RSS` (20 % of
+  MemTotal, RSS sum of the subtree), at +10 %, and when the shell ends.
+- `hooks/hooks.json` stays byte-identical (Codex re-asks trust on change;
+  `test_hooks_json_unchanged`).
+
 ## CLI (k5)
 
 `bin/loadguard status|doctor|explain` (`lib/loadguard/cli.py`) only formats the
@@ -169,7 +202,9 @@ the CLI never classifies, scans or compares a figure — a second decision path
 would drift (`test_explain_is_the_hook`). Every other call is hook mode (the
 starter passes no arguments): keep it unchanged in behavior and cost. `bin/` is
 on the Bash tool's PATH, `CLAUDE_PLUGIN_DATA` is not in its env: the CLI derives
-the data dir from its own install path.
+the data dir from its own install path. `learned`/`forget` (k15) manage the
+list through `lib/loadguard/learn.py` (data, not a decision; the binary's
+report tells which file and state the hook sees).
 
 ## Testing
 
@@ -177,8 +212,10 @@ Unit-test the decision function on recorded snapshots: turn files from
 `~/load-incidents/` into fixtures (PSI + meminfo + command → expected decision).
 The test driver (`-DLOADGUARD_TEST`) runs the real decision against a fixture
 root (`decide ROOT`, `slots ROOT`, `measure ROOT`, `report ROOT`, `explain ROOT`,
-`heavy`); running processes are JSON specs in `t/fixtures/procs/`, context
-event payloads (for `decide ROOT`) in `t/fixtures/events/`. The production
+`heavy`, `extract`, `watch SESSION ROOT...` — one watcher pass per root);
+running processes are JSON specs in `t/fixtures/procs/`, context
+event payloads (for `decide ROOT`) in `t/fixtures/events/`. Tests set
+`XDG_STATE_HOME` so the developer's learned list never leaks in. The production
 binary has no root override; low `LOADGUARD_*` limits force its line on the
 live host without load.
 Never generate real memory pressure on reuben to test — it is the machine this

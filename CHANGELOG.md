@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- loadguard learns heavy commands (k15). Each confined session gets a
+  watcher — `loadguard-hook --watch PID`, started detached by the
+  `SessionStart` confine hook once the session is in its scope, one per
+  scope — that sums every 2 s the resident memory of each Bash call's
+  process tree (the shell Claude Code or Codex runs the call in, and all
+  below it). A call that reaches `LOADGUARD_LEARN_RSS` (default 20) % of
+  RAM is written at once, by its exact command text, to
+  `${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl` (at most 100
+  entries, the one longest not seen big dropped first; atomic writes under
+  `flock`). From then on the hook calls that exact text heavy: refused
+  under memory pressure or with every slot busy, with the reason
+  `heavy command refused (learned: peaked at 3.4 GiB RSS on 2026-09-21)`,
+  and holding a slot while it runs. Commands the fixed list already names
+  are not learned; the first run of anything is left to the session's
+  memory limit. The watcher reads only `cgroup.procs`, `stat` and `statm`
+  (a process's `cmdline` once, when its call crosses the limit), never
+  spins, prints nothing and ends with the session. The light path now
+  reads one file, the learned list (a failed `open` while there is none;
+  a FIFO, directory, broken or oversized list counts as empty):
+  0.579 → 0.585 ms without a list, 0.713 ms with 100 entries on reuben.
+  The command is taken from Claude Code's Bash wrapper as recorded live
+  (2.1.283, ten cases in `t/fixtures/shells/`: a quote inside the command
+  is written `'"'"'`), and from Codex's `bash -c <command>` as its sources
+  say (not yet confirmed live) — under Codex only for calls that keep
+  their shell: bash execs the last command of `-c`, so a lone command or
+  `cd x && cmd` is not learned there. New CLI commands `loadguard learned` and
+  `loadguard forget <n>…|--all`; `explain` names a learned match, `doctor`
+  gets a learning section (list, threshold, this session's watcher),
+  `--report` a `learn` object. `LOADGUARD_LEARN=0` turns learning off (no
+  watcher, list ignored). `hooks/hooks.json` is unchanged, so Codex asks
+  for no new trust; a test pins its hash.
 - README gets its title image (k9): `assets/github.png` at the top, linked to
   the repo, quantized to a 256-colour palette to stay under GitHub's 1 MB
   social-preview limit (805 KB, was 3.17 MB RGB). Install now covers the

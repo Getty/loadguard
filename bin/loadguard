@@ -6,6 +6,9 @@
 #                                  them, this session's scope
 #   loadguard doctor               can loadguard work here; exit 1 if not
 #   loadguard explain '<command>'  what the hook would do with it now, dry
+#   loadguard learned              the learned list (k15): commands that once
+#                                  took a lot of memory, heavy from then on
+#   loadguard forget <n>...|--all  drop learned commands
 #
 # The decisions come from the hook binary's read-only report modes; see
 # lib/loadguard/cli.py. Nothing here builds or refuses anything.

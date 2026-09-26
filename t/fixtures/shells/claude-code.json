@@ -1,0 +1,96 @@
+{
+ "comment": "Recorded 2026-09-27 on reuben with Claude Code 2.1.283: the model's own Bash tool calls, each ending in a script that copied its parent's /proc/<pid>/cmdline -- the wrapper shell Claude Code runs the call in. `command` is tool_input.command as sent, `argv` the wrapper's argv. Read-only, no load.",
+ "cases": [
+  {
+   "case": "plain",
+   "command": "python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py plain",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py plain' < /dev/null && pwd -P >| /tmp/claude-00f4-cwd"
+   ]
+  },
+  {
+   "case": "single",
+   "command": "echo 'it'\"'\"'s' 'a b' >/dev/null; python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py single",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'echo '\"'\"'it'\"'\"'\"'\"'\"'\"'\"'\"'s'\"'\"' '\"'\"'a b'\"'\"' >/dev/null; python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py single' < /dev/null && pwd -P >| /tmp/claude-de3d-cwd"
+   ]
+  },
+  {
+   "case": "double",
+   "command": "echo \"a \\\"b\\\" \\$HOME $HOME\" > /dev/null && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py double",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'echo \"a \\\"b\\\" \\$HOME $HOME\" > /dev/null && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py double' < /dev/null && pwd -P >| /tmp/claude-3ee9-cwd"
+   ]
+  },
+  {
+   "case": "heredoc",
+   "command": "cat <<'EOF' >/dev/null\nit's \"quoted\" $HOME \\n `x`\nEOF\npython3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py heredoc",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cat <<'\"'\"'EOF'\"'\"' >/dev/null\nit'\"'\"'s \"quoted\" $HOME \\n `x`\nEOF\npython3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py heredoc' && pwd -P >| /tmp/claude-b3db-cwd"
+   ]
+  },
+  {
+   "case": "cd-backslash-utf8",
+   "command": "cd /tmp && printf '%s\\n' a\\\\b \"c\\\\d\" 'ü €' > /dev/null; python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py cd-backslash-utf8",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd /tmp && printf '\"'\"'%s\\n'\"'\"' a\\\\b \"c\\\\d\" '\"'\"'ü €'\"'\"' > /dev/null; python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py cd-backslash-utf8' < /dev/null && pwd -P >| /tmp/claude-6958-cwd"
+   ]
+  },
+  {
+   "case": "background",
+   "command": "python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py background; sleep 1",
+   "run_in_background": true,
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py background; sleep 1' < /dev/null && pwd -P >| /tmp/claude-0a33-cwd"
+   ]
+  },
+  {
+   "case": "ansi-comment-leading-space",
+   "command": "  echo $'tab\\there' \"!x\" 'end' >/dev/null # trailing comment 'q'\npython3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py ansi-comment-leading-space   ",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '  echo $'\"'\"'tab\\there'\"'\"' \"!x\" '\"'\"'end'\"'\"' >/dev/null # trailing comment '\"'\"'q'\"'\"'\npython3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py ansi-comment-leading-space   ' < /dev/null && pwd -P >| /tmp/claude-7ff5-cwd"
+   ]
+  },
+  {
+   "case": "stdin-reader",
+   "command": "python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py stdin-reader < /dev/null | cat",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py stdin-reader < /dev/null | cat' && pwd -P >| /tmp/claude-a8f4-cwd"
+   ]
+  },
+  {
+   "case": "continuation-subst",
+   "command": "echo \"$(printf 'x\\ty')\" \\\n  >/dev/null && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py continuation-subst",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'echo \"$(printf '\"'\"'x\\ty'\"'\"')\" \\\n  >/dev/null && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py continuation-subst' < /dev/null && pwd -P >| /tmp/claude-7292-cwd"
+   ]
+  },
+  {
+   "case": "sleep-then",
+   "command": "sleep 0.1 && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py sleep-then",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "source /home/getty/.claude/shell-snapshots/snapshot-bash-1790440370169-4dbn6d.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'sleep 0.1 && python3 /tmp/claude-1000/-home-getty-dev-loadguard/09a65589-f461-43af-b6ae-f83c99302288/scratchpad/rec.py sleep-then' < /dev/null && pwd -P >| /tmp/claude-8a73-cwd"
+   ]
+  }
+ ]
+}

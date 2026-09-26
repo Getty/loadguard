@@ -125,7 +125,7 @@ hängen; akzeptiertes Rennen: zwei Sessions, die im selben Moment starten, sehen
 einen freien Slot. Schwer = Muster (`prove`, `dzil test|build|release`,
 `make test`, `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
 `perlbench`, `claude --bg`, `claude -p`, seit k11 `codex exec`) **plus** alles,
-was nachträglich im Scope viel Speicher gezogen hat (Lernliste, später).
+was nachträglich im Scope viel Speicher gezogen hat (Lernliste, unten).
 
 Kein freier Slot → Stufe 3 statt stillem Warten (die KI soll wissen, dass sie wartet).
 
@@ -246,6 +246,199 @@ sonst kann die KI nicht einmal nachsehen, was los ist.
   es jetzt `--explain`).
 - **Rennen, akzeptiert:** zwei Sessions im selben Moment sehen beide einen freien
   Slot; ebenso ein Befehl, dessen schwerer Prozess noch nicht läuft.
+- **Live bestätigt** (2026-09-27, `claude -p --plugin-dir` mit Haiku, Claude
+  Code 2.1.283): ruhig mit Default-Schwellen bleiben alle fünf Hooks stumm,
+  `make test` läuft. Mit `LOADGUARD_HEAVY_SLOTS=1` und einem `make test` aus
+  einer anderen Session im Slice verweigert der Hook mit Slot-Grund und nennt
+  den fremden Halter; keine Kontextzeile (volle Slots allein zählen nicht).
+
+### Lernliste (entschieden 2026-09-27)
+
+Zweck: vorbeugend für schwere Befehle außerhalb der festen Liste (eigene
+Skripte, Build- und Test-Werkzeuge, die dort nicht stehen). **[korrigiert
+2026-09-27]** Als Beleg stand hier `/usr/bin/perl t/json_data.t` (3,2–3,4 GB an
+drei Tagen, 20260912/-17/-21) als Testdatei „direkt mit `perl`". Falsch: in
+allen drei Snapshots ist sein Elternprozess MakeMakers `test_harness`, er lief
+unter `make test`, das die feste Liste schon fängt (Befund k15). Keiner der 54
+Snapshots zeigt einen Fall, den erst die Lernliste gefangen hätte; der
+3,8-GB-Einzeiler kam nur einmal vor, dagegen hilft nur das Scope-Limit
+(Stufe 1).
+
+- **Einheit = der exakte Befehlstext** (Getty 2026-09-27: keine Abstraktion,
+  „das meiste wird prove oder irgendwas mit nem Container sein"): der String,
+  den das Modell als `tool_input.command` schickt, byte-gleich. `cd x && …`
+  und `…` sind zwei Befehle. Nicht gelernt wird, was die feste Liste schon
+  schwer nennt.
+- **Gelernt, wenn** die Prozesse eines Befehls zusammen (RSS-Summe des
+  Teilbaums unter seiner Shell) `LOADGUARD_LEARN_RSS` % von `MemTotal`
+  erreichen, Default **20** (reuben 1,6 GB), 1–100. RSS, nicht PSS:
+  `smaps_rollup` läuft die Seitentabellen ab und kann unter Thrash hängen.
+- **Beobachter pro Session** (Getty 2026-09-27: A): das Hook-Binary im Modus
+  `--watch`, von `hooks/loadguard-confine` nach dem Einsperren abgelöst
+  gestartet (setsid, stdio auf `/dev/null`, `nice`), lebt im Scope der Session.
+  Alle 2 s: `cgroup.procs` des Scopes, je PID `/proc/<pid>/stat` und `statm` —
+  beides ohne fremde Seiten einzulagern; `cmdline` nur einmal pro neuer
+  Shell, die die Schwelle reißt. Ein Beobachter pro Scope (`flock` auf eine
+  Datei in `$XDG_RUNTIME_DIR/loadguard/`); ein fortgesetzter oder
+  verschachtelter Start im selben Scope endet sofort. Er endet, sobald der
+  Session-Prozess weg ist — er darf den Scope nie am Leben halten. Ohne
+  Binary (erste Session, Build läuft) kein Beobachter in dieser Session.
+  Verworfen: ein gemeinsamer Dienst (Singleton über D-Bus, mehr bewegliche
+  Teile); nur in Hook-Läufen mitschauen (ein Vordergrund-Befehl ruft keinen
+  Hook, solange er läuft).
+- **Welcher Befehl:** vom großen Teilbaum aufwärts die oberste
+  `<shell> -c|-lc <string>` unterhalb des Session-Prozesses. Claude Code:
+  `/bin/bash -c '… eval '<cmd>' … && pwd -P >| /tmp/claude-XXXX-cwd'` — der
+  `eval`-Text, Single-Quote-entschärft (aufgezeichnet: `'"'"'`, nicht
+  `'\''` — k15 unten), ist `tool_input.command`
+  (live 2026-09-26 für einen einfachen Befehl gesehen; Quotes, Zeilenumbrüche,
+  Heredocs, `run_in_background`: aufgezeichnet in k15). Codex: `bash -c|-lc
+  <cmd>` hinter der Sandbox-Kette, argv[2] = der Befehl (live beim Codex-Test
+  zu prüfen). Nicht lesbar oder unbekannte Form → nichts gelernt.
+- **Sofort schreiben:** beim ersten Reißen der Schwelle, nicht erst am Ende —
+  ein Thrash-Reboot mitten im Befehl darf die Lektion nicht verlieren. Danach
+  schreibt der Beobachter den Spitzenwert nur neu, wenn er um mindestens 10 %
+  gewachsen ist, und einmal, wenn die Shell endet.
+- **Ablage:** `${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl`, eine
+  pro Nutzer, geteilt von Claude Code und Codex. Je Zeile ein JSON-Objekt:
+  Befehl, Spitzen-RSS, cwd, zuerst und zuletzt groß gesehen. Höchstens 100
+  Einträge; darüber fällt der am längsten nicht mehr groß gesehene. Schreiben
+  atomar (tmp + rename) unter `flock` — Beobachter und CLI.
+- **Im Hook:** exakter Treffer → schwer, wie ein Muster-Treffer (verweigert unter
+  Druck oder bei vollen Slots); der Grund sagt, dass er gelernt ist, mit
+  Spitzenwert und Datum. Ein laufender gelernter Befehl hält einen Slot: der
+  Scan erkennt seine Shell über dieselbe Extraktion (oberster Halter zählt,
+  wie bisher). **Invariante geändert** (Getty 2026-09-27): der leichte Pfad
+  liest jetzt eine Datei, die Lernliste — ohne Datei ein fehlgeschlagenes
+  `open`. Kaputt, zu groß, unlesbar → leer (fail-open).
+- **Schalter:** `LOADGUARD_LEARN=0` (nur genau `0`): kein Beobachter, Liste
+  ignoriert. `LOADGUARD_THROTTLE=0` schaltet wie bisher alles Verweigern ab.
+- **CLI:** `loadguard learned` (Liste mit Nummer, Spitze, zuletzt, cwd, Befehl),
+  `loadguard forget <n>` / `--all`; `explain` nennt einen gelernten Treffer;
+  `doctor` zeigt Lernen an/aus, Einträge, Beobachter dieser Session.
+- **`hooks/hooks.json` bleibt unverändert** — Codex verlangt sonst neuen Trust.
+- **Grenzen:** der erste Lauf wird nie gefangen (dafür das Scope-Limit); wer in
+  unter 2 s explodiert und im Scope gekillt wird, kann dem Beobachter entgehen;
+  eine Session ohne Scope (kein Linger, `LOADGUARD_CONFINE=0`) lernt nicht.
+
+### Umgesetzt (k15): Lernliste
+
+`src/loadguard-hook.c` (`--watch`, Liste im Hook und im Slot-Scan),
+`lib/loadguard/learn.py`, `hooks/loadguard-confine`, `lib/loadguard/cli.py`;
+Tests `t/test_learn.py`, dazu `t/test_cli.py` `Doctor`,
+`t/test_hook_passthrough.py` `CodexRuns`/`PluginWiring`; Fixtures
+`t/fixtures/shells/claude-code.json`.
+
+- **Wrapper aufgezeichnet** (2026-09-27, Claude Code 2.1.283, zehn eigene
+  Bash-Aufrufe; ein Kind las `/proc/<Wrapper>/cmdline`, nur lesend, keine
+  Last): `/bin/bash -c 'source <snapshot> 2>/dev/null || true && shopt -u
+  extglob 2>/dev/null || true && { \builtin unalias … } >/dev/null 2>&1 ||
+  true && eval '<cmd>' < /dev/null && pwd -P >| /tmp/claude-XXXX-cwd'`. Ein
+  `'` im Befehl steht als **`'"'"'`** (Quote zu, `"'"`, Quote auf), nicht
+  als `'\''` wie oben angenommen. ` < /dev/null` fehlt, wenn der Befehl
+  einen Heredoc oder eine eigene stdin-Umleitung hat. Einfache und doppelte
+  Quotes, Heredoc, Zeilenumbruch, Zeilenfortsetzung, `$(…)`, Backslashes,
+  UTF-8, `cd x &&`, führende und abschließende Leerzeichen,
+  `run_in_background` (dieselbe Form): In allen zehn Fällen liest die
+  Extraktion den gesendeten Befehl Byte für Byte zurück.
+- **Eine Extraktion** (`shell_command()`) für Beobachter und Slot-Scan:
+  `<shell> -c|-lc <string>`, Shell bash, sh, dash oder zsh. Claude Code:
+  das Wort nach dem ersten `eval `, gelesen wie die Shell es liest (`'…'`
+  wörtlich, `"…"` mit `\"` `\\` `\$` `` \` `` `\<NL>`, `\x`), danach genau
+  `[ < /dev/null] && pwd -P >| <pfad>-cwd` bis zum Ende. `$` oder Backtick
+  in `"…"`, jedes andere ungequotete Zeichen, ein anderes Ende → unbekannte
+  Form. Beide Quote-Schreibweisen lesen sich gleich. Codex: argv[2]
+  unverändert. Der Beobachter nimmt die Form des Session-Prozesses (claude →
+  nur der Wrapper, codex → nur argv[2]) — so wird unter Claude Code ein
+  MCP-Server hinter `sh -c 'context7-mcp'` (so auf reuben) nie gelernt; der
+  Slot-Scan kennt den Harness nicht und nimmt den Wrapper, sonst argv[2].
+- **Beobachter** `loadguard-hook --watch PID`, PID = der Prozess, für den der
+  Scope angelegt wurde (die Zahl im Scope-Namen): Ein verschachteltes
+  `claude -p` oder ein weiterer App-Server-Thread fragt nach dem Beobachter,
+  der schon läuft. Beim Start: `comm`/argv[0] `claude` oder `codex`,
+  `/proc/PID/cgroup` endet in `loadguard-*.scope`, MemTotal lesbar,
+  `$XDG_RUNTIME_DIR` gesetzt und `<scope>.watch` darin per `flock` LOCK_NB
+  frei (die Datei hält seine PID, für `doctor`) — sonst sofort exit 0.
+  `setpriority` 10, `chdir /`, keine Ausgabe. Alle 2 s: Startzeit des
+  Session-Prozesses unverändert (sonst Ende, auch bei wiederverwendeter
+  PID), `cgroup.procs`, je PID `stat` (ppid, comm, Startzeit) und `statm`.
+  Aufruf = oberste Shell (nach `comm`) unter dem Session-Prozess, seine
+  RSS = Summe über Shell und alle Nachfahren; Waisen (Eltern nicht im Scope,
+  `foo &` nach Ende der Shell) zählen niemandem. `cmdline` genau einmal, wenn
+  ein Aufruf die Schwelle reißt; danach gelernt oder als übersprungen
+  gemerkt, bis seine Shell endet (höchstens 16 zugleich). Nicht gelernt:
+  unbekannte Form, feste Liste, leer, über 4096 Byte, kein UTF-8.
+  Geschrieben wird beim Reißen, bei ≥ 10 % mehr, beim Ende der Shell, und
+  für alle offenen, wenn der Session-Prozess weg ist. Die Lock-Datei geht
+  mit ihm.
+- **Liste**: je Zeile `{"command", "peak_rss" (Byte, der höchste je
+  gesehene), "cwd", "first_seen", "last_seen" (UTC, ISO 8601)}`. Beobachter
+  und `loadguard forget` schreiben unter `flock` auf `learned.lock`: neue
+  Datei, `fsync`, `rename`, `fsync` des Verzeichnisses; Modus 0600, das
+  Verzeichnis 0700. Über 100 Einträge fällt der mit dem kleinsten
+  `last_seen`; kaputte Zeilen fallen beim Schreiben weg, eine zu große Datei
+  wird ersetzt.
+- **Im Hook**: erst die Muster, dann die Liste (`K_LEARNED`, hält einen
+  Slot). Gelesen per `open(O_NONBLOCK)` und `fstat`: nur eine reguläre Datei
+  bis 1 MiB, höchstens 256 Zeilen — ein FIFO an ihrer Stelle blockiert den
+  leichten Pfad nicht. Grund: `loadguard: heavy command refused (learned:
+  peaked at 3.4 GiB RSS on 2026-09-21): memory pressure …` (Datum aus
+  `last_seen`, nur `JJJJ-MM-TT` übernommen); Rat wie bei jedem schweren
+  Befehl, ohne eigenen Zusatz. Slot-Scan: eine Shell, deren Befehl in der
+  Liste steht, ist Halter, benannt nach dem Befehl (auf 48 Byte gekürzt);
+  sie liest cmdlines bis 64 KiB, abgeschnitten → kein Treffer; leere Liste →
+  keine Extraktion.
+- **Start**: `hooks/loadguard-confine` nach `confine()`, nur bei `attached`
+  oder `already`, Binary aus `$CLAUDE_PLUGIN_DATA/bin` (Codex setzt es
+  ebenso), abgelöst wie der Build (fork, setsid, stdio auf `/dev/null`,
+  cwd `/`, nicht gewartet). Nach `attached` läuft der Hook außerhalb des
+  Scopes — `confine()` verschiebt die Session, nicht die Hook-Kette —, also
+  kommt der Beobachter per `AttachProcessesToUnit` hinein; nach `already`
+  ist der Hook schon drin. `hooks.json` Byte für Byte unverändert (ein Test
+  pinnt den SHA-256).
+- **Report und CLI**: `--report` hat `learn` (`on`, `file`, `state`,
+  `entries`, `rss_limit`); `ignored` nennt `LOADGUARD_LEARN` ≠ `0` und ein
+  ungültiges `LOADGUARD_LEARN_RSS`. `loadguard learned` (Nummer, Spitze,
+  zuletzt, cwd, Befehl; nur ASCII), `loadguard forget <n>…|--all`; `explain`
+  nennt den Treffer im heavy-Label (`yes (learned: …)`); `doctor` hat den
+  Abschnitt „learning": Liste, Schwelle in GiB, der Beobachter dieser Session
+  (PID aus `<scope>.watch`, deren argv `… --watch …`). Fehlt er in einer
+  eingesperrten Session, ist das FAIL.
+- **Kosten** (reuben, 318 Prozesse, je 1500 Läufe abwechselnd gegen HEAD,
+  `nice`, Prozessstart inklusive): leicht HEAD 0,579 ms → ohne Liste 0,585,
+  mit 100 Einträgen (19 KB) 0,713 (p90 0,876), 100 Einträge à 1 KiB
+  (117 KB) 0,939 — das Parsen jeder Zeile mit cJSON. Schwer mit Scan 5,716
+  → 5,739 ohne, 5,911 mit 100 Einträgen. Ein Takt des Beobachters (Treiber
+  mit Produktions-Flags, 1000 Durchläufe über die echten Scopes, Host
+  beschäftigt): 27 µs bei einem Prozess bis 0,9 ms bei 34, etwa 15–26 µs je
+  Prozess — alle 2 s.
+- **Beleg, genauer besehen**: In allen drei Snapshots ist
+  `/usr/bin/perl t/json_data.t` (bis 3 746 216 kB, 46,6 % am 2026-09-17) ein
+  Kind des MakeMaker-Testharness (`perl -MExtUtils::Command::MM
+  -MTest::Harness -e … test_harness(…)`), lief also unter `make test`, das
+  die feste Liste schon schwer nennt; die Shell darüber zeigen die Snapshots
+  nicht. Die Lernliste bleibt für Befehle außerhalb der Liste — der Beleg
+  oben trägt sie weniger, als er klingt.
+- **Grenzen, dazu**: bash 5.2 `exec`t den letzten Befehl eines `-c`-Strings
+  (auf reuben geprüft, harmlose `sleep`: `bash -c 'sleep 2'` und `bash -c
+  'cd /tmp && sleep 2'` hinterlassen nur `sleep`, `'sleep 2; true'` behält
+  bash). Codex startet jeden Aufruf als `bash -c <cmd>` — ein einzelner
+  Befehl oder `cd x && cmd` läuft also ohne Shell, aus der sich der Text
+  lesen ließe, und wird unter Codex **nicht gelernt**; nur Aufrufe, bei
+  denen bash bleibt (Pipes, `;`-Listen, Schleifen), liefern argv[2]
+  (`test_codex_lone_command_leaves_no_shell`). Claude Code betrifft das
+  nicht: Nach dem `eval` folgt `&& pwd -P …`, die Shell bleibt (so
+  aufgezeichnet). Dieselbe Beobachtung heißt: `procs/codex-session.json`
+  (k11, bash 7203 → prove 7204 für `prove -lr t/`) zeigt vermutlich eine
+  Shell, die es so nicht gibt; die Slot-Zählung beurteilt argv und bleibt
+  richtig. Überlebt ein `claude --bg` die Session, deren Scope er teilt,
+  endet der Beobachter mit dem Scope-Eigner; der Rest läuft unbeobachtet
+  weiter. Ein Befehl, den der Beobachter unter Codex liest, der aber anders
+  ankommt als gesendet, landet als Text, der nie trifft.
+- **Offen**: Codex live — ob argv[2] der Shell gleich `tool_input.command`
+  ist (nach den Quellen ja: das Snapshot-Skript `exec`t genau den Befehl),
+  und wie oft bash dort bleibt (siehe Grenzen).
+  Claude Codes zsh-Wrapper ist nicht aufgezeichnet (dieselbe Form erwartet).
 
 ### Stufe 4 — Lagebewusstsein (optional)
 

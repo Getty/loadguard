@@ -11,10 +11,10 @@ inside that session instead of dragging the whole machine into swap.
 
 When memory runs short, or too many heavy commands already run across all
 sessions, it refuses the next heavy one — a test suite, a build, a new
-headless `claude` — and tells the model why, with the numbers and a lighter
-alternative. While memory stays short, the model hears it with every prompt,
-before it tries; when the host is calm, loadguard adds nothing to the
-context.
+headless `claude`, or a command that once took a fifth of the RAM — and
+tells the model why, with the numbers and a lighter alternative. While
+memory stays short, the model hears it with every prompt, before it tries;
+when the host is calm, loadguard adds nothing to the context.
 
 Linux only. The same plugin runs under Codex; see [Codex](#codex).
 
@@ -80,8 +80,9 @@ costs nothing per command.
 ### Refusing heavy commands
 
 Before every `Bash` call a small C hook looks at the command. Light commands —
-`git status`, `ls`, `cat`, anything not on the list below — pass at once,
-without the hook reading a single file. A **heavy** command is refused when
+`git status`, `ls`, `cat`, anything not on the list below and not learned —
+pass at once; the only file the hook reads for them is the learned list
+([below](#learning-what-is-heavy)). A **heavy** command is refused when
 
 - the host is under memory pressure: PSI memory `full avg10` at or above 10 %,
   or all swap (zram and swapfile together) at least 90 % used; or
@@ -91,7 +92,8 @@ without the hook reading a single file. A **heavy** command is refused when
 Heavy means the command runs `prove`, `make … test`, `dzil test|build|release`,
 `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
 `perlbench`, or starts a headless agent session: `claude -p`/`--print`/`--bg`
-or `codex exec`. It is recognised in command position —
+or `codex exec` — or it is a command loadguard has learned. It is
+recognised in command position —
 `cd x && FOO=1 nice prove -lr t/` is heavy, `git log --grep=prove` or a
 heredoc that mentions `make test` is not. A running command holds one slot
 however many processes it spawns; a nested `claude -p` or `codex exec` holds
@@ -117,6 +119,35 @@ ones; swap stayed at or below 68 % calm and reached 92–100 % thrashing. The
 hook costs about 0.5 ms for a light command and under 5 ms for a heavy one on
 that 4-core machine. Under memory pressure it does not look at other
 processes at all — reading them can itself stall on swap.
+
+### Learning what is heavy
+
+A fixed list cannot know every command that eats memory. So each confined
+session also gets a watcher: a detached run of the same C binary, inside
+the session's scope, that looks every 2 seconds at the resident memory of
+each `Bash` call — the shell Claude Code (or Codex) runs the call in, and
+everything below it, added up. When one call reaches 20 % of RAM
+(`LOADGUARD_LEARN_RSS`), its exact command text goes into
+`~/.local/state/loadguard/learned.jsonl` at once, before a thrash can take
+the lesson with it. From then on the hook treats that text as heavy:
+refused under memory pressure or with every slot busy, holding a slot while
+it runs. The reason says why:
+
+```
+loadguard: heavy command refused (learned: peaked at 3.4 GiB RSS on 2026-09-21): memory pressure full=59.9% (limit 10%), swap 100% used (limit 90%).
+Wait and retry later; light commands (git status, ls, cat) still run.
+```
+
+Exact means exact: `cd x && make bench` and `make bench` are two commands,
+and a changed flag makes a new one. Commands the fixed list already calls
+heavy are not learned. The first run of anything is never caught — the
+session's memory limit is what stops that one. The list is shared by all
+sessions and by Claude Code and Codex, keeps at most 100 commands (the one
+longest not seen big goes first), and is yours to read and trim:
+`loadguard learned`, `loadguard forget <n>`. The watcher reads two kernel
+files per process (`stat`, `statm`) and a call's command line once, when it
+crosses the limit; it ends as soon as its session does. A full list of 100
+short commands adds about 0.13 ms to the 0.6 ms of a light command.
 
 ### Telling the model before it tries
 
@@ -158,15 +189,14 @@ Built:
 - **The pressure line** (above) on `UserPromptSubmit` and `SessionStart`,
   from the same binary: one line while memory is under pressure, nothing
   otherwise.
-- **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`.
+- **Learning heavy commands** (above): a watcher per session learns the
+  exact text of a call that reached 20 % of RAM; the hook refuses it like a
+  listed one from then on.
+- **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`,
+  `learned`, `forget`.
 - **Codex support** (below), built against the Codex 0.153.4 sources and
   tested on reconstructed payloads; the first live run under Codex is still
   ahead.
-
-Not built yet:
-
-- **Learning heavy commands** from what actually used a lot of memory in a
-  session, beyond the fixed list.
 
 The design, with the measurements behind each decision, is in
 [`docs/design.md`](docs/design.md) (German).
@@ -192,8 +222,9 @@ plugin does nothing.
 ## Configuration
 
 Environment variables, from the environment `claude` was started with. The
-confinement ones are read when a session starts, the refusal ones on every
-`Bash` call and, for the pressure line, on every prompt and session start.
+confinement ones and `LOADGUARD_LEARN_RSS` are read when a session starts,
+the refusal ones on every `Bash` call and, for the pressure line, on every
+prompt and session start.
 Values are integers; a trailing `%` is accepted. An invalid or
 out-of-range value falls back to the default.
 
@@ -208,6 +239,8 @@ out-of-range value falls back to the default.
 | `LOADGUARD_SWAP_USED` | `90` | … or at this much of all swap used, 1–100 % |
 | `LOADGUARD_HEAVY_SLOTS` | `nproc/2`, at least 1 | heavy commands allowed at once across all confined sessions |
 | `LOADGUARD_THROTTLE` | — | `0` turns refusing and the pressure line off |
+| `LOADGUARD_LEARN_RSS` | `20` | learn a `Bash` call once its processes together hold this share of `MemTotal`, 1–100 % |
+| `LOADGUARD_LEARN` | — | `0` turns learning off: no watcher, and the learned list is ignored |
 
 The limit is per session, and `claude` itself (about 300 MB) counts against
 it. To see where a session landed:
@@ -228,6 +261,8 @@ from a session or with the full path
 | `loadguard status` | memory pressure, swap, zram, the limits in effect, heavy slots busy and who holds them, whether this session is confined |
 | `loadguard explain '<command>'` | what the hook would do with this Bash command right now — a dry run, nothing is executed |
 | `loadguard doctor` | whether loadguard can work on this host; exits 1 if something that should work does not |
+| `loadguard learned` | the learned commands: number, peak memory, when last seen big, where, the exact text |
+| `loadguard forget <n>…` / `--all` | drop learned commands by their number in `learned`, or all of them |
 
 ```
 $ loadguard status
@@ -283,6 +318,8 @@ session. If the hook's sources changed, it rebuilds on that session start.
   the default.
 - **Refusing and the pressure line:** start `claude` with
   `LOADGUARD_THROTTLE=0`, same rule.
+- **Learning:** `LOADGUARD_LEARN=0`, same rule; `loadguard forget --all`
+  empties the list.
 - **The whole plugin:** `claude plugin disable loadguard@getty`, or
   `claude plugin uninstall loadguard@getty`.
 
@@ -333,6 +370,13 @@ Differences from Claude Code:
 - A refused command reaches the model as
   `Command blocked by PreToolUse hook: <reason>. Command: <command>` —
   Codex's wrapping around the same reason.
+- **Learning is narrower.** It reads the command from the shell Codex
+  starts (`bash -c <command>`), which by Codex's sources is the command as
+  sent — not yet confirmed in a live run. And bash replaces itself with the
+  last command of such a string, so a lone command or `cd x && cmd` leaves
+  no shell to read: under Codex only calls that keep their shell
+  (pipelines, `;` lists, loops) are learned. Claude Code's calls always
+  keep theirs.
 
 ## Develop
 

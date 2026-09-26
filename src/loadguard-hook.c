@@ -16,8 +16,9 @@
  * env — runs prove, dzil test|build|release, make … test, cpanm,
  * docker|podman build|run, cargo build|test, npm test, perlbench,
  * claude -p|--print|--bg or codex exec|e. Quotes, comments and heredoc
- * bodies are not commands. Everything else is light and costs no read beyond
- * stdin.
+ * bodies are not commands. Also heavy: a command whose exact text is in the
+ * learned list (k15, below). Everything else is light and costs one read
+ * beyond stdin — the learned list, a failed open() while there is none.
  *
  * No room (docs/design.md, Stufe 2/3, "Umgesetzt (k4)"):
  *  1. memory PSI full avg10 >= LOADGUARD_PSI_FULL (10 %) or total swap used
@@ -32,9 +33,18 @@
  *     heavy process of a chain counts (prove's perl children, a recursive
  *     make). claude -p/--bg and codex exec sessions hold no slot; what they
  *     run does. Codex's sandbox helpers (codex-linux-sandbox, bwrap) are
- *     no heavy process and hide none (k11).
+ *     no heavy process and hide none (k11). A shell running a learned
+ *     command holds a slot too (k15).
  * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through, and no
  * context line — nothing is refused, so there is nothing to warn about.
+ *
+ * The learned list (k15, docs/design.md "Lernliste"):
+ * ${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl, one JSON object
+ * per line, the exact tool_input.command of a Bash call whose processes
+ * once held LOADGUARD_LEARN_RSS (20) % of MemTotal between them. Written by
+ * `--watch PID`, one watcher per session scope, started detached by
+ * hooks/loadguard-confine; read by the hook. LOADGUARD_LEARN=0: no watcher,
+ * list ignored. A broken, oversized or unreadable list counts as empty.
  *
  * Fail open: whatever goes wrong (empty or oversized stdin, not UTF-8, broken
  * JSON, missing fields, out of memory) ends in exit 0 with nothing on stdout.
@@ -43,29 +53,34 @@
  * code with which a hook blocks regardless of its output — on
  * UserPromptSubmit it would erase the user's prompt.
  *
- * Cheap: no fork, no exec, no file other than stdin on the light path; the
- * context events read /proc/pressure/memory and /proc/meminfo only. JSON
- * only via the vendored cJSON (vendor/cJSON/) — commands carry escapes,
- * heredocs, Unicode.
+ * Cheap: no fork, no exec, no file other than stdin and the learned list on
+ * the light path; the context events read /proc/pressure/memory and
+ * /proc/meminfo only. JSON only via the vendored cJSON (vendor/cJSON/) —
+ * commands carry escapes, heredocs, Unicode.
  *
  * Commands are never rewritten (k3): confinement is per session, done on
  * SessionStart (hooks/loadguard-confine). This hook only stays silent,
  * denies, or adds its line of context.
  *
- * Hook mode is any call but the two below; hooks/loadguard execs the binary
- * without arguments. For bin/loadguard (k5) there are two read-only report
- * modes, one line of JSON on stdout each:
+ * Hook mode is any call but the three below; hooks/loadguard execs the
+ * binary without arguments. For bin/loadguard (k5) there are two read-only
+ * report modes, one line of JSON on stdout each:
  *   --report     the host as the heavy path sees it: limits, pressure, slots
- *                (not scanned under pressure, as in the hook); reads no stdin
+ *                (not scanned under pressure, as in the hook), the learned
+ *                list; reads no stdin
  *   --explain    a hook payload on stdin: the hook's answer and what it
  *                measured on the way
  * Both run objection() and no_room(), the functions the hook runs; nothing
- * in them decides on its own.
+ * in them decides on its own. And the watcher (k15):
+ *   --watch PID  PID is the session process a loadguard-*.scope was made
+ *                for; watch that scope every 2 s until PID is gone. Reads
+ *                no stdin, prints nothing, always exits 0.
  *
  * Built with -DLOADGUARD_TEST, main() is swapped for a test driver that
- * exposes the extraction, the matcher, the measurement, the decision and the
- * reports against a fixture root (t/test_hook_binary.py, t/test_throttle.py);
- * the production binary reads the real /proc and has no test mode.
+ * exposes the extraction, the matcher, the measurement, the decision, the
+ * reports and the watcher against a fixture root (t/test_hook_binary.py,
+ * t/test_throttle.py, t/test_learn.py); the production binary reads the
+ * real /proc and has no test mode.
  */
 
 #define _GNU_SOURCE
@@ -81,6 +96,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -219,14 +238,15 @@ enum kind {
     K_PROVE,        /* prove */
     K_SUITE,        /* a whole test suite: make test, dzil test|release, … */
     K_BUILD,        /* builds, installs, containers, perlbench */
-    K_AGENT         /* claude -p|--print|--bg, codex exec|e: a new headless
+    K_AGENT,        /* claude -p|--print|--bg, codex exec|e: a new headless
                        agent session, heavy to start, holds no slot */
+    K_LEARNED       /* the exact text of a command in the learned list (k15) */
 };
 
 struct match {
     enum kind kind;
     int at;             /* index of the command word in the argv judged */
-    char label[32];     /* "prove", "make test", "podman run", … */
+    char label[64];     /* "prove", "make test", "podman run", "learned: …" */
 };
 
 static const char *const INTERPRETERS[] = {
@@ -612,6 +632,122 @@ static enum kind heavy_command(const char *cmd, struct match *m)
 }
 
 /* ------------------------------------------------------------------------
+ * The Bash call behind a running shell (k15). One reading for the watcher,
+ * which learns the command, and the slot scan, which finds it running.
+ */
+
+static const char *const SHELLS[] = {"bash", "sh", "dash", "zsh", NULL};
+
+enum harness {
+    H_ANY,          /* the slot scan: Claude Code's wrapper, else Codex's */
+    H_CLAUDE,       /* only Claude Code's wrapper */
+    H_CODEX         /* only Codex's plain string */
+};
+
+/*
+ * The eval text of Claude Code's wrapper around a Bash call, on the heap;
+ * NULL if s is not that wrapper. Recorded with 2.1.283
+ * (t/fixtures/shells/claude-code.json):
+ *
+ *   source <snapshot> … || true && eval '<command>' < /dev/null && pwd -P >| /tmp/claude-XXXX-cwd
+ *
+ * The command is one single-quoted word, a quote inside it written as
+ * '"'"'; " < /dev/null" is left out when the command has a heredoc or a
+ * stdin redirection of its own. The word is read as the shell reads it —
+ * '…' literally, "…" with \" \\ \$ \` \<newline>, \x outside quotes — so
+ * the '\'' spelling reads as well. Anything the shell would expand or split
+ * ($ or ` in double quotes, any other unquoted character) and any other
+ * ending is not the wrapper.
+ */
+static char *claude_eval(const char *s)
+{
+    const char *p = s, *q;
+    char *out, *o;
+
+    while ((p = strstr(p, "eval ")) != NULL && p != s && p[-1] != ' ')
+        p++;
+    if (p == NULL || (out = malloc(strlen(p) + 1)) == NULL)
+        return NULL;
+    o = out;
+    for (p += 5; *p != '\0' && *p != ' ';) {
+        if (*p == '\'') {
+            if ((q = strchr(p + 1, '\'')) == NULL)
+                goto unknown;
+            memcpy(o, p + 1, (size_t)(q - p - 1));
+            o += q - p - 1;
+            p = q + 1;
+        } else if (*p == '"') {
+            for (p++; *p != '"'; p++) {
+                if (*p == '\0' || *p == '$' || *p == '`')
+                    goto unknown;
+                if (*p == '\\' && p[1] != '\0' &&
+                    strchr("\"\\$`\n", p[1]) != NULL) {
+                    p++;
+                    if (*p == '\n')
+                        continue;           /* line continuation */
+                }
+                *o++ = *p;
+            }
+            p++;
+        } else if (*p == '\\' && p[1] != '\0') {
+            if (p[1] != '\n')
+                *o++ = p[1];
+            p += 2;
+        } else {
+            goto unknown;
+        }
+    }
+    *o = '\0';
+    if (strncmp(p, " < /dev/null", 12) == 0)
+        p += 12;
+    if (strncmp(p, " && pwd -P >| ", 14) != 0)
+        goto unknown;
+    p += 14;
+    q = p + strcspn(p, " \t\n'\"\\$`;&|<>()");
+    if (*q == '\0' && q - p > 4 && strcmp(q - 4, "-cwd") == 0)
+        return out;
+unknown:
+    free(out);
+    return NULL;
+}
+
+/*
+ * The command a running `<shell> -c|-lc <string>` executes, on the heap;
+ * NULL if argv is no such shell or the string is not of the harness's
+ * form. Claude Code: the eval text of its wrapper. Codex: the string
+ * itself — codex-rs runs `<shell> -c|-lc <command>`, with its shell
+ * snapshot as a script that execs exactly that (core/src/shell.rs:22-31,
+ * tools/runtimes/mod.rs:225-302); not yet checked against a live Codex
+ * payload.
+ */
+static char *shell_command(char *const *av, int ac, enum harness h)
+{
+    char *cmd = NULL;
+
+    if (ac < 3 || !one_of(base(av[0]), SHELLS) ||
+        (strcmp(av[1], "-c") != 0 && strcmp(av[1], "-lc") != 0))
+        return NULL;
+    if (h != H_CODEX)
+        cmd = claude_eval(av[2]);
+    if (cmd == NULL && h != H_CLAUDE)
+        cmd = strdup(av[2]);
+    return cmd;
+}
+
+/* The NUL-separated args of a cmdline into av; trailing empty ones dropped. */
+static int split_argv(char *buf, ssize_t len, char **av, int max)
+{
+    char *p;
+    int ac = 0;
+
+    for (p = buf; p < buf + len && ac < max; p += strlen(p) + 1)
+        av[ac++] = p;
+    while (ac > 1 && av[ac - 1][0] == '\0')
+        ac--;
+    return ac;
+}
+
+/* ------------------------------------------------------------------------
  * Measurement. `root` prefixes every path; it is "" in production and a
  * fixture tree in the test driver.
  */
@@ -739,6 +875,248 @@ static int zram_fill(const char *root)
 }
 
 /* ------------------------------------------------------------------------
+ * The learned list (k15): read by the hook and the slot scan, written by
+ * the watcher (below) and by `loadguard forget` (lib/loadguard/learn.py),
+ * both under flock on learned.lock, each write a new file renamed over the
+ * old one.
+ */
+
+#define LEARNED_FILE "learned.jsonl"
+#define LEARNED_LOCK "learned.lock"
+#define LEARNED_BYTES ((size_t)1 << 20)   /* larger: ignored, as if empty */
+#define LEARNED_LINES 256                  /* lines read at most */
+#define LEARNED_MAX 100                    /* entries the watcher keeps */
+#define LEARN_COMMAND_MAX 4096             /* longer commands are not learned */
+#define LEARN_RSS_DEFAULT 20               /* % of MemTotal */
+
+enum { LS_OFF, LS_NONE, LS_OK, LS_TOO_LARGE, LS_UNREADABLE };
+static const char *const LEARN_STATES[] = {
+    "off", "none", "ok", "too-large", "unreadable"
+};
+
+struct lesson {
+    char *command;
+    double peak;                /* bytes, -1 unknown */
+    char last[11];              /* date last seen big, "" unknown */
+};
+
+static struct {
+    int loaded, state, n;
+    struct lesson l[LEARNED_LINES];
+} lessons;
+
+/* LOADGUARD_LEARN=0, only that exact value: no watcher, list ignored. */
+static int learn_off(void)
+{
+    const char *off = getenv("LOADGUARD_LEARN");
+    return off != NULL && strcmp(off, "0") == 0;
+}
+
+/* ${XDG_STATE_HOME:-$HOME/.local/state}/loadguard/<name>; 0 without an
+ * absolute path for either (the XDG spec ignores a relative one). */
+static int state_file(char *out, size_t size, const char *name)
+{
+    const char *xdg = getenv("XDG_STATE_HOME"), *home = getenv("HOME");
+    int n;
+
+    if (xdg != NULL && xdg[0] == '/')
+        n = snprintf(out, size, "%s/loadguard/%s", xdg, name);
+    else if (home != NULL && home[0] == '/')
+        n = snprintf(out, size, "%s/.local/state/loadguard/%s", home, name);
+    else
+        return 0;
+    return n > 0 && (size_t)n < size;
+}
+
+/*
+ * A regular file of at most max bytes, NUL-terminated, on the heap, its
+ * length in *len; else NULL and why in *state. O_NONBLOCK and the fstat
+ * keep a FIFO planted in its place from blocking the hook.
+ */
+static char *read_regular(const char *path, size_t max, size_t *len,
+                          int *state)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    struct stat st;
+    char *buf = NULL;
+    size_t n = 0;
+
+    *state = LS_UNREADABLE;
+    if (fd < 0) {
+        if (errno == ENOENT)
+            *state = LS_NONE;
+        return NULL;
+    }
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+        if ((size_t)st.st_size > max)
+            *state = LS_TOO_LARGE;
+        else
+            buf = malloc((size_t)st.st_size + 1);
+    }
+    while (buf != NULL && n < (size_t)st.st_size) {
+        ssize_t r = read(fd, buf + n, (size_t)st.st_size - n);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r < 0) {
+            free(buf);
+            buf = NULL;
+        } else if (r == 0) {
+            break;
+        } else {
+            n += (size_t)r;
+        }
+    }
+    close(fd);
+    if (buf != NULL) {
+        buf[n] = '\0';
+        *len = n;
+        *state = LS_OK;
+    }
+    return buf;
+}
+
+/* One line of the list as a JSON object with a string "command", or NULL. */
+static cJSON *parse_lesson(const char *line, size_t n)
+{
+    const char *end = NULL;
+    cJSON *o = cJSON_ParseWithLengthOpts(line, n, &end, 0);
+
+    if (o == NULL)
+        return NULL;
+    while (end != NULL && end < line + n && isspace((unsigned char)*end))
+        end++;
+    if (end != line + n || !cJSON_IsObject(o) ||
+        !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(o, "command"))) {
+        cJSON_Delete(o);
+        return NULL;
+    }
+    return o;
+}
+
+/* Each object line of a list text, at most LEARNED_LINES; for each, fn. */
+static void each_lesson(const char *buf, size_t len,
+                        void (*fn)(cJSON *, void *), void *arg)
+{
+    const char *line, *end;
+    int lines = 0;
+
+    for (line = buf; line < buf + len && lines < LEARNED_LINES;
+         line = end + 1, lines++) {
+        cJSON *o;
+        end = memchr(line, '\n', (size_t)(buf + len - line));
+        if (end == NULL)
+            end = buf + len;
+        if ((o = parse_lesson(line, (size_t)(end - line))) != NULL)
+            fn(o, arg);
+    }
+}
+
+static void keep_lesson(cJSON *o, void *unused)
+{
+    const cJSON *peak = cJSON_GetObjectItemCaseSensitive(o, "peak_rss");
+    const cJSON *last = cJSON_GetObjectItemCaseSensitive(o, "last_seen");
+    struct lesson *ls = &lessons.l[lessons.n];
+    const char *d;
+    int i;
+
+    (void)unused;
+    ls->command = strdup(cJSON_GetObjectItemCaseSensitive(o, "command")
+                             ->valuestring);
+    if (ls->command != NULL) {
+        ls->peak = cJSON_IsNumber(peak) && peak->valuedouble > 0
+                       ? peak->valuedouble : -1;
+        /* The date goes into a reason: only YYYY-MM-DD. */
+        ls->last[0] = '\0';
+        if (cJSON_IsString(last) && strlen(d = last->valuestring) >= 10) {
+            for (i = 0; i < 10; i++)
+                if (i == 4 || i == 7 ? d[i] != '-'
+                                     : !isdigit((unsigned char)d[i]))
+                    break;
+            if (i == 10)
+                snprintf(ls->last, sizeof ls->last, "%.10s", d);
+        }
+        lessons.n++;
+    }
+    cJSON_Delete(o);
+}
+
+/* The list, read once per run; nothing while learning is off. */
+static void load_lessons(void)
+{
+    char path[PATH_MAX], *buf;
+    size_t len;
+
+    if (lessons.loaded)
+        return;
+    lessons.loaded = 1;
+    lessons.state = LS_OFF;
+    if (learn_off())
+        return;
+    lessons.state = LS_NONE;
+    if (!state_file(path, sizeof path, LEARNED_FILE))
+        return;
+    buf = read_regular(path, LEARNED_BYTES, &len, &lessons.state);
+    if (buf == NULL)
+        return;
+    each_lesson(buf, len, keep_lesson, NULL);
+    free(buf);
+}
+
+static const struct lesson *lesson_for(const char *command)
+{
+    int i;
+
+    load_lessons();
+    for (i = 0; i < lessons.n; i++)
+        if (strcmp(lessons.l[i].command, command) == 0)
+            return &lessons.l[i];
+    return NULL;
+}
+
+/* "3.2 GiB", "640 MiB" */
+static void human_size(double bytes, char *out, size_t size)
+{
+    if (bytes >= 1073741824.0)
+        snprintf(out, size, "%.1f GiB", bytes / 1073741824.0);
+    else
+        snprintf(out, size, "%.0f MiB", bytes / 1048576.0);
+}
+
+/* "learned: peaked at 3.2 GiB RSS on 2026-09-21" */
+static void lesson_label(const struct lesson *ls, char *label, size_t size)
+{
+    char peak[32];
+    size_t n;
+
+    snprintf(label, size, "learned");
+    if (ls->peak > 0) {
+        human_size(ls->peak, peak, sizeof peak);
+        n = strlen(label);
+        snprintf(label + n, size - n, ": peaked at %s RSS", peak);
+    }
+    if (ls->last[0] != '\0') {
+        n = strlen(label);
+        snprintf(label + n, size - n, " on %s", ls->last);
+    }
+}
+
+/* s into out, cut to fit with "..." at a character boundary. */
+static void cut(char *out, size_t size, const char *s)
+{
+    size_t n = strlen(s);
+
+    if (n < size) {
+        memcpy(out, s, n + 1);
+        return;
+    }
+    n = size - 4;
+    while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80)
+        n--;
+    memcpy(out, s, n);
+    strcpy(out + n, "...");
+}
+
+/* ------------------------------------------------------------------------
  * Heavy slots: one pass over /proc, processes under app-loadguard.slice.
  */
 
@@ -780,24 +1158,43 @@ static int read_ppid(const char *root, int pid, int *ppid)
     return p != NULL && sscanf(p + 1, " %*c %d", ppid) == 1;
 }
 
+/*
+ * K_LEARNED if argv is a shell running a command of the learned list; the
+ * command, cut to fit, in label. Nothing is extracted while the list is
+ * empty.
+ */
+static enum kind learned_shell(char *const *av, int ac, char *label,
+                               size_t size)
+{
+    char *cmd;
+    int found;
+
+    load_lessons();
+    if (lessons.n == 0 || (cmd = shell_command(av, ac, H_ANY)) == NULL)
+        return K_NONE;
+    found = lesson_for(cmd) != NULL;
+    if (found)
+        cut(label, size, cmd);
+    free(cmd);
+    return found ? K_LEARNED : K_NONE;
+}
+
 /* The kind of a running process by its argv; its short command in label. */
 static enum kind process_kind(const char *root, int pid, char *label,
                               size_t size)
 {
-    char path[64], buf[4096], *av[MAX_WORDS];
+    /* Room for a wrapper around a learned command of the longest kind. */
+    static char buf[1 << 16];
+    char path[64], *av[MAX_WORDS];
     struct match m;
     ssize_t len;
-    int ac = 0, i;
-    char *p;
+    int ac, i;
 
     snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
     len = slurp(root, path, buf, sizeof buf);
     if (len <= 0)
         return K_NONE;          /* gone, a zombie, a kernel thread */
-    for (p = buf; p < buf + len && ac < MAX_WORDS; p += strlen(p) + 1)
-        av[ac++] = p;
-    while (ac > 1 && av[ac - 1][0] == '\0')
-        ac--;
+    ac = split_argv(buf, len, av, MAX_WORDS);
     /* A process title (npm: "npm test", padded with NULs) is one string. */
     if (ac == 1 && strchr(av[0], ' ') != NULL) {
         char *save, *w;
@@ -807,7 +1204,10 @@ static enum kind process_kind(const char *root, int pid, char *label,
             av[ac++] = w;
     }
     if (classify(av, ac, &m) == K_NONE)
-        return K_NONE;
+        /* A cut-off cmdline has lost the wrapper's ending. */
+        return (size_t)len < sizeof buf - 1 ? learned_shell(av, ac, label,
+                                                            size)
+                                            : K_NONE;
     snprintf(label, size, "%s", base(av[m.at]));
     for (i = m.at + 1; i < ac; i++) {
         size_t used = strlen(label);
@@ -960,7 +1360,7 @@ static int env_int(const char *name, int def, int lo, int hi)
 }
 
 /* The tunable limits; the reports list the ones set but invalid. */
-enum { L_PSI_FULL, L_SWAP_USED, L_SLOTS, N_LIMITS };
+enum { L_PSI_FULL, L_SWAP_USED, L_SLOTS, L_LEARN_RSS, N_LIMITS };
 
 static const struct {
     const char *env;
@@ -969,6 +1369,7 @@ static const struct {
     [L_PSI_FULL] = {"LOADGUARD_PSI_FULL", 1, 100},
     [L_SWAP_USED] = {"LOADGUARD_SWAP_USED", 1, 100},
     [L_SLOTS] = {"LOADGUARD_HEAVY_SLOTS", 1, 4096},
+    [L_LEARN_RSS] = {"LOADGUARD_LEARN_RSS", 1, 100},
 };
 
 static int limit(int which, int def)
@@ -1071,7 +1472,7 @@ static void advice(char *r, size_t size, const struct match *m, int slots)
  */
 struct verdict {
     int off;                /* LOADGUARD_THROTTLE=0: nothing looked at */
-    struct match m;         /* m.kind K_NONE: light, nothing read */
+    struct match m;         /* m.kind K_NONE: light, only the list read */
     int pressured;          /* no_room() ran: c, pr set; pr at a limit */
     int scanned;            /* no_room() found no pressure: c.slots, sl set */
     struct config c;
@@ -1109,9 +1510,23 @@ static int no_room(const char *root, struct verdict *v)
     return v->sl.busy >= v->c.slots;
 }
 
+/* Is the exact command in the learned list? Then heavy, labelled with its
+ * peak and date. */
+static int learned_command(const char *command, struct match *m)
+{
+    const struct lesson *ls = lesson_for(command);
+
+    if (ls == NULL)
+        return 0;
+    m->kind = K_LEARNED;
+    m->at = 0;
+    lesson_label(ls, m->label, sizeof m->label);
+    return 1;
+}
+
 /*
  * The deny reason for a Bash command into reason; 0 if loadguard has no
- * objection. Light commands return before any read.
+ * objection. Light commands return having read the learned list only.
  */
 static int objection(const char *root, const char *command, struct verdict *v,
                      char *reason, size_t size)
@@ -1121,7 +1536,8 @@ static int objection(const char *root, const char *command, struct verdict *v,
     v->m.kind = K_NONE;
     v->pressured = v->scanned = 0;
     v->off = throttle_off();
-    if (v->off || heavy_command(command, &v->m) == K_NONE)
+    if (v->off || (heavy_command(command, &v->m) == K_NONE &&
+                   !learned_command(command, &v->m)))
         return 0;
     if (!no_room(root, v))
         return 0;
@@ -1189,9 +1605,9 @@ static int situation(const char *root, struct verdict *v, char *line,
 }
 
 /*
- * The longest reason is about 870 bytes (3 holders of < 160, all figures at
- * 100 %, the longest advice), the context line 216 at most: neither ever
- * gets cut, and so never mid-character.
+ * The longest reason is about 900 bytes (a label of < 64, 3 holders of
+ * < 160, all figures at 100 %, the longest advice), the context line 216 at
+ * most: neither ever gets cut, and so never mid-character.
  */
 #define REASON_MAX 1024
 
@@ -1297,7 +1713,27 @@ static cJSON *report_start(const char *mode, int off)
     for (i = 0; i < N_LIMITS; i++)
         if (getenv(LIMITS[i].env) != NULL && limit(i, -1) < 0)
             cJSON_AddItemToArray(ignored, cJSON_CreateString(LIMITS[i].env));
+    if (getenv("LOADGUARD_LEARN") != NULL && !learn_off())
+        cJSON_AddItemToArray(ignored, cJSON_CreateString("LOADGUARD_LEARN"));
     return out;
+}
+
+/* The learned list as the hook reads it (k15). */
+static void put_learn(cJSON *out)
+{
+    cJSON *o = cJSON_AddObjectToObject(out, "learn");
+    char path[PATH_MAX];
+
+    load_lessons();
+    cJSON_AddBoolToObject(o, "on", !learn_off());
+    if (state_file(path, sizeof path, LEARNED_FILE))
+        cJSON_AddStringToObject(o, "file", path);
+    else
+        cJSON_AddNullToObject(o, "file");
+    cJSON_AddStringToObject(o, "state", LEARN_STATES[lessons.state]);
+    cJSON_AddNumberToObject(o, "entries", lessons.n);
+    cJSON_AddNumberToObject(o, "rss_limit",
+                            limit(L_LEARN_RSS, LEARN_RSS_DEFAULT));
 }
 
 /* What no_room() measured: limits, pressure, and the slots if scanned. */
@@ -1353,6 +1789,7 @@ static int report_status(const char *root)
     out = report_start("status", v.off);
     put_room(out, root, &v, 1);
     cJSON_AddBoolToObject(out, "refuse_heavy", !v.off && full);
+    put_learn(out);
     return report_print(out);
 }
 
@@ -1389,7 +1826,573 @@ static int report_explain(const char *root, const cJSON *payload)
     return report_print(out);
 }
 
+/* ------------------------------------------------------------------------
+ * The watcher (k15): `--watch PID`, one per session scope. Every TICK_S it
+ * reads the scope's cgroup.procs and, per process, /proc/<pid>/stat and
+ * statm — kernel counters, no page of the process is touched — and sums
+ * the RSS below each Bash call: the topmost `<shell> -c|-lc` under the
+ * session process. A call at LOADGUARD_LEARN_RSS % of MemTotal is written
+ * to the list at once (a thrash reboot mid-command must not lose it), again
+ * when its peak grew by 10 %, and once when its shell ends. Its cmdline is
+ * read once, when it first crosses the limit. RSS, not PSS: smaps_rollup
+ * walks the page tables and can hang under thrash.
+ *
+ * It never keeps the scope alive: it ends as soon as the session process is
+ * gone (or its scope, or its start time changed: a reused PID). It never
+ * spins: every pass ends in a TICK_S sleep. Anything it cannot read counts
+ * as nothing; it prints nothing.
+ */
+
+#define TICK_S 2
+#define RUNS 16                 /* calls over the limit tracked at once */
+
+struct wproc {
+    int pid, ppid, shell;
+    unsigned long long start, rss, sum;
+};
+
+struct run {                    /* a Bash call over the limit */
+    int pid, learning;          /* learning 0: not learned, cmdline read */
+    unsigned long long start, peak, written;
+    char *command;
+    char cwd[PATH_MAX];
+};
+
+struct watch {
+    const char *root;
+    int session, self;
+    unsigned long long since;   /* the session process's start time */
+    enum harness harness;
+    char procs[PATH_MAX];       /* the scope's cgroup.procs */
+    unsigned long long limit;   /* bytes */
+    unsigned long long page;
+    int nrun;
+    struct run run[RUNS];
+};
+
+/* The test driver logs what the watcher does; production does not. */
+static FILE *watch_log;
+static int watch_pass;
+
+static void log_run(const char *event, const struct run *r, const char *why)
+{
+    cJSON *o;
+    char *text;
+
+    if (watch_log == NULL || (o = cJSON_CreateObject()) == NULL)
+        return;
+    cJSON_AddNumberToObject(o, "tick", watch_pass);
+    cJSON_AddStringToObject(o, "event", event);
+    cJSON_AddNumberToObject(o, "pid", r->pid);
+    cJSON_AddNumberToObject(o, "peak", (double)r->peak);
+    if (r->command != NULL)
+        cJSON_AddStringToObject(o, "command", r->command);
+    if (why != NULL)
+        cJSON_AddStringToObject(o, "why", why);
+    if ((text = cJSON_PrintUnformatted(o)) != NULL) {
+        fprintf(watch_log, "%s\n", text);
+        cJSON_free(text);
+    }
+    cJSON_Delete(o);
+}
+
+/* comm (may be NULL), ppid and start time from /proc/<pid>/stat. */
+static int read_stat(const char *root, int pid, char *comm, size_t size,
+                     int *ppid, unsigned long long *start)
+{
+    char path[64], buf[1024], *open_paren, *close_paren;
+
+    snprintf(path, sizeof path, "/proc/%d/stat", pid);
+    if (slurp(root, path, buf, sizeof buf) <= 0 ||
+        (open_paren = strchr(buf, '(')) == NULL ||
+        (close_paren = strrchr(buf, ')')) == NULL)
+        return 0;
+    if (comm != NULL)
+        snprintf(comm, size, "%.*s", (int)(close_paren - open_paren - 1),
+                 open_paren + 1);
+    /* state ppid, 17 fields, starttime (proc(5): fields 3, 4, 22) */
+    return sscanf(close_paren + 1,
+                  " %*c %d %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s "
+                  "%*s %*s %*s %*s %*s %llu", ppid, start) == 2;
+}
+
+/* Resident bytes from /proc/<pid>/statm. */
+static int read_rss(const struct watch *w, int pid, unsigned long long *rss)
+{
+    char path[64], buf[256];
+    unsigned long long pages;
+
+    snprintf(path, sizeof path, "/proc/%d/statm", pid);
+    if (slurp(w->root, path, buf, sizeof buf) <= 0 ||
+        sscanf(buf, "%*s %llu", &pages) != 1)
+        return 0;
+    *rss = pages * w->page;
+    return 1;
+}
+
+/* Claude Code or Codex by comm or argv[0], as confine.py's session_name. */
+static enum harness harness_of(const char *root, int pid, const char *comm)
+{
+    char path[64], buf[4096];
+    const char *name = comm;
+
+    if (strcmp(name, "claude") != 0 && strcmp(name, "codex") != 0) {
+        snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+        if (slurp(root, path, buf, sizeof buf) <= 0)
+            return H_ANY;
+        name = base(buf);
+    }
+    return strcmp(name, "claude") == 0 ? H_CLAUDE
+         : strcmp(name, "codex") == 0  ? H_CODEX : H_ANY;
+}
+
+/*
+ * The loadguard-*.scope pid is in: its cgroup.procs below /sys/fs/cgroup
+ * into procs, its name into name.
+ */
+static int scope_of(const char *root, int pid, char *procs, size_t psize,
+                    char *name, size_t nsize)
+{
+    char path[64], buf[4096], *p, *nl, *slash;
+    size_t n;
+
+    snprintf(path, sizeof path, "/proc/%d/cgroup", pid);
+    if (slurp(root, path, buf, sizeof buf) <= 0)
+        return 0;
+    for (p = buf; p != NULL && strncmp(p, "0::", 3) != 0;
+         p = (nl = strchr(p, '\n')) != NULL ? nl + 1 : NULL)
+        ;
+    if (p == NULL)
+        return 0;
+    if ((nl = strchr(p, '\n')) != NULL)
+        *nl = '\0';
+    slash = strrchr(p, '/');
+    if (slash == NULL || strncmp(slash + 1, "loadguard-", 10) != 0 ||
+        (n = strlen(slash + 1)) <= 16 || strcmp(slash + n - 5, ".scope") != 0)
+        return 0;
+    return snprintf(procs, psize, "/sys/fs/cgroup%s/cgroup.procs", p + 3) <
+               (int)psize &&
+           snprintf(name, nsize, "%s", slash + 1) < (int)nsize;
+}
+
+/* Every missing directory above file, mode 0700; 0 if the last fails. */
+static int make_dirs(const char *file)
+{
+    char dir[PATH_MAX], *s;
+
+    if (snprintf(dir, sizeof dir, "%s", file) >= (int)sizeof dir ||
+        (s = strrchr(dir, '/')) == NULL || s == dir)
+        return 0;
+    *s = '\0';
+    for (s = dir + 1; *s != '\0'; s++)
+        if (*s == '/') {
+            *s = '\0';
+            mkdir(dir, 0700);
+            *s = '/';
+        }
+    return mkdir(dir, 0700) == 0 || errno == EEXIST;
+}
+
+/* Replace the object's key, or add it. */
+static void set_item(cJSON *o, const char *key, cJSON *item)
+{
+    if (item == NULL)
+        return;
+    if (cJSON_GetObjectItemCaseSensitive(o, key) != NULL)
+        cJSON_ReplaceItemInObjectCaseSensitive(o, key, item);
+    else
+        cJSON_AddItemToObject(o, key, item);
+}
+
+static void add_to_array(cJSON *o, void *array)
+{
+    cJSON_AddItemToArray(array, o);
+}
+
+static const char *last_seen(const cJSON *o)
+{
+    const cJSON *last = cJSON_GetObjectItemCaseSensitive(o, "last_seen");
+    return cJSON_IsString(last) ? last->valuestring : "";
+}
+
+/* The whole list into path.<pid>.tmp, synced, renamed over path. */
+static void write_lessons(const char *path, const cJSON *all)
+{
+    char tmp[PATH_MAX + 32], dir[PATH_MAX], *slash;
+    const cJSON *o;
+    FILE *f;
+    int ok = 1, fd;
+
+    if (snprintf(tmp, sizeof tmp, "%s.%d.tmp", path, (int)getpid()) >=
+            (int)sizeof tmp ||
+        (fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600)) < 0)
+        return;
+    if ((f = fdopen(fd, "w")) == NULL) {
+        close(fd);
+        unlink(tmp);
+        return;
+    }
+    cJSON_ArrayForEach(o, all) {
+        char *text = cJSON_PrintUnformatted(o);
+        ok = ok && text != NULL && fprintf(f, "%s\n", text) > 0;
+        cJSON_free(text);
+    }
+    ok = fflush(f) == 0 && ok && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0 || !ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return;
+    }
+    snprintf(dir, sizeof dir, "%s", path);
+    if ((slash = strrchr(dir, '/')) != NULL && slash != dir) {
+        *slash = '\0';
+        if ((fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) >= 0) {
+            fsync(fd);
+            close(fd);
+        }
+    }
+}
+
+/*
+ * Record a run in the list under flock: its peak (the highest ever seen
+ * for the command), cwd and last_seen; first_seen when new. Above
+ * LEARNED_MAX entries the one longest not seen big goes. An oversized or
+ * broken list is replaced; lines that are no entry are dropped.
+ */
+static void learned_update(const struct run *r, time_t now)
+{
+    char path[PATH_MAX], lock_path[PATH_MAX], stamp[32], *buf;
+    cJSON *all, *hit = NULL, *o;
+    const cJSON *peak;
+    struct tm tm;
+    size_t len;
+    int lock, state;
+
+    if (!state_file(path, sizeof path, LEARNED_FILE) ||
+        !state_file(lock_path, sizeof lock_path, LEARNED_LOCK) ||
+        !make_dirs(lock_path) ||
+        (lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600)) < 0)
+        return;
+    if (flock(lock, LOCK_EX) != 0 || (all = cJSON_CreateArray()) == NULL) {
+        close(lock);
+        return;
+    }
+    if ((buf = read_regular(path, LEARNED_BYTES, &len, &state)) != NULL) {
+        each_lesson(buf, len, add_to_array, all);
+        free(buf);
+    }
+    gmtime_r(&now, &tm);
+    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    cJSON_ArrayForEach(o, all)
+        if (strcmp(cJSON_GetObjectItemCaseSensitive(o, "command")
+                       ->valuestring, r->command) == 0) {
+            hit = o;
+            break;
+        }
+    if (hit == NULL && (hit = cJSON_CreateObject()) != NULL) {
+        cJSON_AddStringToObject(hit, "command", r->command);
+        cJSON_AddItemToArray(all, hit);
+    }
+    if (hit != NULL) {
+        peak = cJSON_GetObjectItemCaseSensitive(hit, "peak_rss");
+        set_item(hit, "peak_rss", cJSON_CreateNumber(
+            cJSON_IsNumber(peak) && peak->valuedouble > (double)r->peak
+                ? peak->valuedouble : (double)r->peak));
+        set_item(hit, "cwd", cJSON_CreateString(r->cwd));
+        if (cJSON_GetObjectItemCaseSensitive(hit, "first_seen") == NULL)
+            set_item(hit, "first_seen", cJSON_CreateString(stamp));
+        set_item(hit, "last_seen", cJSON_CreateString(stamp));
+    }
+    while (cJSON_GetArraySize(all) > LEARNED_MAX) {
+        cJSON *oldest = NULL;
+        cJSON_ArrayForEach(o, all)
+            if (oldest == NULL || strcmp(last_seen(o), last_seen(oldest)) < 0)
+                oldest = o;
+        cJSON_Delete(cJSON_DetachItemViaPointer(all, oldest));
+    }
+    write_lessons(path, all);
+    cJSON_Delete(all);
+    close(lock);                /* releases the flock */
+}
+
+static void record(struct run *r, time_t now, const char *event)
+{
+    learned_update(r, now);
+    r->written = r->peak;
+    log_run(event, r, NULL);
+}
+
+/*
+ * The command of a shell over the limit, on the heap, or NULL (why says
+ * why): its cmdline is read here, once. Not learned: a form the harness
+ * does not use, an empty, overlong or non-UTF-8 command, one the fixed
+ * list calls heavy already.
+ */
+static char *run_command(const struct watch *w, int pid, const char **why)
+{
+    static char buf[1 << 18];
+    char path[64], *av[MAX_WORDS], *cmd;
+    struct match m;
+    ssize_t len;
+    size_t n;
+
+    snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+    len = slurp(w->root, path, buf, sizeof buf);
+    if (len <= 0 || (size_t)len >= sizeof buf - 1) {
+        *why = "cmdline";
+        return NULL;
+    }
+    cmd = shell_command(av, split_argv(buf, len, av, MAX_WORDS), w->harness);
+    if (cmd == NULL) {
+        *why = "form";
+        return NULL;
+    }
+    n = strlen(cmd);
+    if (n == 0 || n > LEARN_COMMAND_MAX ||
+        !valid_utf8((const unsigned char *)cmd, n))
+        *why = "text";
+    else if (heavy_command(cmd, &m) != K_NONE)
+        *why = "fixed";
+    else
+        return cmd;
+    free(cmd);
+    return NULL;
+}
+
+static void start_run(struct watch *w, const struct wproc *sh, time_t now)
+{
+    char path[64];
+    const char *why = "full";
+    struct run *r, spill;
+    ssize_t n;
+
+    if (w->nrun == RUNS) {
+        memset(&spill, 0, sizeof spill);
+        spill.pid = sh->pid;
+        spill.peak = sh->sum;
+        log_run("skip", &spill, why);
+        return;
+    }
+    r = &w->run[w->nrun++];
+    memset(r, 0, sizeof *r);
+    r->pid = sh->pid;
+    r->start = sh->start;
+    r->peak = sh->sum;
+    if ((r->command = run_command(w, sh->pid, &why)) == NULL) {
+        log_run("skip", r, why);
+        return;
+    }
+    snprintf(path, sizeof path, "%s/proc/%d/cwd", w->root, sh->pid);
+    n = readlink(path, r->cwd, sizeof r->cwd - 1);
+    r->cwd[n > 0 ? n : 0] = '\0';
+    sanitize(r->cwd);
+    r->learning = 1;
+    record(r, now, "learn");
+}
+
+/* The last word on a run whose shell ended; frees it. */
+static void end_run(struct watch *w, int i, time_t now)
+{
+    struct run *r = &w->run[i];
+
+    if (r->learning)
+        record(r, now, "end");
+    free(r->command);
+    *r = w->run[--w->nrun];
+}
+
+static int by_wpid(const void *a, const void *b)
+{
+    int x = ((const struct wproc *)a)->pid, y = ((const struct wproc *)b)->pid;
+    return (x > y) - (x < y);
+}
+
+static struct wproc *find_w(struct wproc *ps, size_t n, int pid)
+{
+    struct wproc key;
+    key.pid = pid;
+    return bsearch(&key, ps, n, sizeof *ps, by_wpid);
+}
+
+/* The topmost shell between p and the session process; NULL if none, or if
+ * p is not below the session (an orphan whose shell is gone). */
+static struct wproc *top_shell(struct wproc *ps, size_t n, struct wproc *p,
+                               int session)
+{
+    struct wproc *top = NULL;
+    int depth;
+
+    for (depth = 0; depth < MAX_DEPTH && p->pid != session; depth++) {
+        if (p->shell)
+            top = p;
+        if (p->ppid == session)
+            return top;
+        if ((p = find_w(ps, n, p->ppid)) == NULL)
+            return NULL;
+    }
+    return NULL;
+}
+
+/* One look at the scope; 0 once the session process is gone. */
+static int watch_tick(struct watch *w, time_t now)
+{
+    static char buf[1 << 16];
+    static struct wproc *ps;
+    static size_t cap;
+    unsigned long long start;
+    char comm[64], *p, *end;
+    size_t n = 0, i;
+    int ppid, j;
+
+    if (!read_stat(w->root, w->session, NULL, 0, &ppid, &start) ||
+        start != w->since || slurp(w->root, w->procs, buf, sizeof buf) < 0) {
+        while (w->nrun > 0)
+            end_run(w, w->nrun - 1, now);
+        return 0;
+    }
+    for (p = buf;; p = end) {
+        long pid = strtol(p, &end, 10);
+        if (end == p)
+            break;
+        if (pid <= 0 || pid > INT_MAX || pid == w->self)
+            continue;
+        if (n == cap) {
+            struct wproc *more = realloc(ps, (cap ? cap * 2 : 64) * sizeof *ps);
+            if (more == NULL)
+                break;
+            ps = more;
+            cap = cap ? cap * 2 : 64;
+        }
+        ps[n].pid = (int)pid;
+        if (!read_stat(w->root, ps[n].pid, comm, sizeof comm, &ps[n].ppid,
+                       &ps[n].start) ||
+            !read_rss(w, ps[n].pid, &ps[n].rss))
+            continue;               /* gone meanwhile */
+        ps[n].shell = one_of(comm, SHELLS);
+        ps[n].sum = 0;
+        n++;
+    }
+    if (n > 0)
+        qsort(ps, n, sizeof *ps, by_wpid);
+    for (i = 0; i < n; i++) {
+        struct wproc *top = top_shell(ps, n, &ps[i], w->session);
+        if (top != NULL)
+            top->sum += ps[i].rss;
+    }
+    for (j = w->nrun - 1; j >= 0; j--) {
+        struct run *r = &w->run[j];
+        struct wproc *sh = find_w(ps, n, r->pid);
+        if (sh == NULL || sh->start != r->start) {
+            end_run(w, j, now);
+            continue;
+        }
+        if (sh->sum > r->peak)
+            r->peak = sh->sum;
+        if (r->learning && r->peak >= r->written + r->written / 10)
+            record(r, now, "grow");
+    }
+    for (i = 0; i < n; i++) {
+        if (!ps[i].shell || ps[i].sum < w->limit)
+            continue;
+        for (j = 0; j < w->nrun; j++)
+            if (w->run[j].pid == ps[i].pid &&
+                w->run[j].start == ps[i].start)
+                break;
+        if (j == w->nrun)
+            start_run(w, &ps[i], now);
+    }
+    return 1;
+}
+
+/* The scope PID was confined in, the harness, the limit; 0 if any is
+ * missing: then there is nothing to watch. */
+static int watch_setup(struct watch *w, const char *root, int pid,
+                       char *scope, size_t size)
+{
+    char comm[64], buf[8192];
+    unsigned long long total;
+    long page = sysconf(_SC_PAGESIZE);
+    int ppid;
+
+    memset(w, 0, sizeof *w);
+    w->root = root;
+    w->session = pid;
+    w->self = (int)getpid();
+    w->page = page > 0 ? (unsigned long long)page : 4096;
+    if (!read_stat(root, pid, comm, sizeof comm, &ppid, &w->since) ||
+        (w->harness = harness_of(root, pid, comm)) == H_ANY ||
+        !scope_of(root, pid, w->procs, sizeof w->procs, scope, size) ||
+        slurp(root, "/proc/meminfo", buf, sizeof buf) <= 0 ||
+        !meminfo(buf, "MemTotal:", &total) || total == 0)
+        return 0;
+    w->limit = total * 1024 / 100 * (unsigned long long)limit(
+        L_LEARN_RSS, LEARN_RSS_DEFAULT);
+    return 1;
+}
+
+/*
+ * One watcher per scope: flock on $XDG_RUNTIME_DIR/loadguard/<scope>.watch,
+ * which holds its pid (for doctor). -1 if another holds it or there is no
+ * runtime dir: a resumed session, a nested claude -p, an app-server
+ * thread find the scope watched already.
+ */
+static int watch_lock(const char *scope, char *path, size_t size)
+{
+    const char *run = getenv("XDG_RUNTIME_DIR");
+    char pid[32];
+    int fd, n;
+
+    if (run == NULL || run[0] != '/' ||
+        snprintf(path, size, "%s/loadguard/%s.watch", run, scope) >=
+            (int)size ||
+        !make_dirs(path) ||
+        (fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600)) < 0)
+        return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -1;
+    }
+    n = snprintf(pid, sizeof pid, "%d\n", (int)getpid());
+    if (ftruncate(fd, 0) != 0 || write(fd, pid, (size_t)n) != n) {
+        /* doctor will not find it; the lock still holds */
+    }
+    return fd;
+}
+
+static void watch_free(struct watch *w)
+{
+    while (w->nrun > 0)
+        free(w->run[--w->nrun].command);
+}
+
 #ifndef LOADGUARD_TEST
+
+/* --watch PID: until the session process is gone. */
+static int watch(const char *arg)
+{
+    char scope[256], lock[PATH_MAX], *end;
+    long pid = strtol(arg, &end, 10);
+    struct timespec pause;
+    struct watch w;
+    int fd;
+
+    if (*arg == '\0' || *end != '\0' || pid <= 1 || pid > INT_MAX ||
+        learn_off() || chdir("/") != 0)
+        return 0;
+    setpriority(PRIO_PROCESS, 0, 10);
+    if (!watch_setup(&w, "", (int)pid, scope, sizeof scope) ||
+        (fd = watch_lock(scope, lock, sizeof lock)) < 0)
+        return 0;
+    while (watch_tick(&w, time(NULL))) {
+        pause.tv_sec = TICK_S;
+        pause.tv_nsec = 0;
+        while (nanosleep(&pause, &pause) != 0 && errno == EINTR)
+            ;
+    }
+    unlink(lock);
+    close(fd);
+    watch_free(&w);
+    return 0;
+}
 
 static void note(const char *why)
 {
@@ -1416,6 +2419,8 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     if (argc == 2 && strcmp(argv[1], "--report") == 0)
         return report_status("");
+    if (argc == 3 && strcmp(argv[1], "--watch") == 0)
+        return watch(argv[2]);
     buf = read_stdin(&len);
     if (explain) {
         int rc;
@@ -1457,8 +2462,72 @@ int main(int argc, char **argv)
  *                  line or nothing), with /proc and /sys below ROOT
  *   report ROOT    any payload: what --report prints, below ROOT
  *   explain ROOT   any payload: what --explain prints, below ROOT
+ *   extract        {"argv": [...], "harness": "claude"|"codex"|"any"}: the
+ *                  command the shell runs, as the watcher and the slot scan
+ *                  read it; nothing and exit 1 if there is none
+ *   watch SESSION ROOT...
+ *                  any payload: the watcher, one pass per ROOT (no sleep;
+ *                  the clock is LOADGUARD_TEST_NOW, default 1790000000,
+ *                  plus TICK_S per pass); one JSON line per thing it does,
+ *                  then {"watch": done|gone|locked|no-scope}
  * Exit 1 if a Bash payload is needed and missing, 64 on usage.
  */
+
+static int driver_extract(const cJSON *payload)
+{
+    const cJSON *args = cJSON_GetObjectItemCaseSensitive(payload, "argv");
+    const cJSON *h = cJSON_GetObjectItemCaseSensitive(payload, "harness");
+    char *av[MAX_WORDS], *cmd;
+    const cJSON *a;
+    int ac = 0;
+
+    cJSON_ArrayForEach(a, args)
+        if (cJSON_IsString(a) && ac < MAX_WORDS)
+            av[ac++] = a->valuestring;
+    cmd = shell_command(av, ac,
+        !cJSON_IsString(h) ? H_ANY
+        : strcmp(h->valuestring, "claude") == 0 ? H_CLAUDE
+        : strcmp(h->valuestring, "codex") == 0 ? H_CODEX : H_ANY);
+    if (cmd == NULL)
+        return 1;
+    fputs(cmd, stdout);
+    free(cmd);
+    return 0;
+}
+
+static int driver_watch(const char *arg, char **roots, int nroots)
+{
+    const char *now = getenv("LOADGUARD_TEST_NOW"), *status = "done";
+    time_t base = now != NULL ? (time_t)strtoll(now, NULL, 10) : 1790000000;
+    char scope[256] = "", lock[PATH_MAX], *end;
+    long pid = strtol(arg, &end, 10);
+    struct watch w;
+    int fd, i;
+
+    memset(&w, 0, sizeof w);
+    watch_log = stdout;
+    if (*end != '\0' || pid <= 0 || pid > INT_MAX ||
+        !watch_setup(&w, roots[0], (int)pid, scope, sizeof scope)) {
+        status = "no-scope";
+    } else if ((fd = watch_lock(scope, lock, sizeof lock)) < 0) {
+        status = "locked";
+    } else {
+        for (i = 0; i < nroots; i++) {
+            w.root = roots[i];
+            watch_pass = i + 1;
+            if (!watch_tick(&w, base + (time_t)TICK_S * i)) {
+                status = "gone";
+                break;
+            }
+        }
+        unlink(lock);
+        close(fd);
+    }
+    watch_free(&w);
+    printf("{\"watch\":\"%s\"}\n", status);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     size_t len = 0;
@@ -1495,6 +2564,10 @@ int main(int argc, char **argv)
         rc = report_status(argv[2]);
     } else if (argc == 3 && strcmp(mode, "explain") == 0) {
         rc = report_explain(argv[2], payload);
+    } else if (argc == 2 && strcmp(mode, "extract") == 0) {
+        rc = driver_extract(payload);
+    } else if (argc >= 4 && strcmp(mode, "watch") == 0) {
+        rc = driver_watch(argv[2], argv + 3, argc - 3);
     } else if (argc == 2 && (strcmp(mode, "command") == 0 ||
                              strcmp(mode, "heavy") == 0)) {
         rc = 1;
