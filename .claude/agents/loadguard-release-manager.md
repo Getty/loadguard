@@ -2,7 +2,6 @@
 name: loadguard-release-manager
 description: "Owns loadguard's git history and release readiness — cuts commits from the worker's commit-ready tree, writes commit messages and the CHANGELOG, moves karr cards to done with the commit hash, audits plugin.json/version before a release. Workers never commit; this agent does. Never pushes, never tags, never releases."
 model: sonnet
-allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - getty-git-commit-style

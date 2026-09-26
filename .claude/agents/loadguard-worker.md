@@ -2,7 +2,6 @@
 name: loadguard-worker
 description: "Default loadguard worker — implement, refactor, debug and test the hook, the CLI and the decision logic. Works one karr card at a time, leaves a commit-ready tree and does NOT commit — commits belong to loadguard-release-manager."
 model: inherit
-allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - loadguard-core
