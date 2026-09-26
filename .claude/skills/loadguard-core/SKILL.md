@@ -80,8 +80,12 @@ Implemented in `lib/loadguard/confine.py` (k3): scope
 `app-loadguard.slice/loadguard-<session8>-<pid>.scope`, via `busctl` once per session.
 `OOMPolicy=continue` is mandatory — the default `stop` kills claude along with the
 outlier. Already in any `loadguard-*.scope` → do nothing (resume/compact, and a nested
-`claude -p` must not escape its parent's limit). A single vanished PID fails the whole
-`StartTransientUnit`, so retry with claude's PID alone.
+`claude -p` must not escape its parent's limit). `PIDs=` holds claude alone (k12): a
+PID that vanishes before systemd moves it fails the unit asynchronously while busctl
+returns 0 — sibling SessionStart hooks do exactly that. Confirm via
+`/proc/<claude>/cgroup`, then move older descendants with `AttachProcessesToUnit`
+(synchronous, needs `Delegate=yes`; one gone PID fails the batch → per PID). No
+second start: same name is "already loaded" until collected.
 
 ## Testing
 

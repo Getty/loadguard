@@ -1,14 +1,29 @@
 """Stage 1: move the claude session into a transient systemd user scope (k3).
 
 Called once per SessionStart from hooks/loadguard-confine. The claude process
-(and whatever it already started: MCP servers) goes into
-app-loadguard.slice/loadguard-<session>-<pid>.scope with memory and CPU
-limits; everything it starts later inherits the scope. Commands are never
+goes into app-loadguard.slice/loadguard-<session>-<pid>.scope with memory and
+CPU limits; everything it starts later inherits the scope. Commands are never
 rewritten.
 
-The call is `busctl --user call … StartTransientUnit` with PIDs=: one
-subprocess per session start, no D-Bus wire protocol reimplemented here.
-busctl ships with systemd, and without systemd there is nothing to attach to.
+The calls go through `busctl --user call`: no D-Bus wire protocol
+reimplemented here. busctl ships with systemd, and without systemd there is
+nothing to attach to.
+
+- StartTransientUnit with PIDs= holding claude alone (k12). systemd checks the
+  PIDs, answers the call, and moves them later: a PID that vanished meanwhile
+  fails the whole unit (Result=resources) while busctl still returns 0. The
+  other SessionStart hooks run as claude's children at the same moment and
+  exit within milliseconds, so only claude, an ancestor of this hook and
+  alive for sure, goes into PIDs=.
+- Once /proc shows claude in the scope, the descendants it started before
+  (MCP servers, the other hooks) are moved with AttachProcessesToUnit, which
+  is synchronous and needs Delegate=yes. One gone PID fails a batch without
+  moving anything, so a failed batch is repeated one PID at a time, and a
+  PID that fails alone is left where it is.
+- No second StartTransientUnit: with claude alone nothing in the call races,
+  and what is left (bus, properties, systemd refusing) fails the same way
+  again. A retry would also need a new name, as the failed unit keeps its
+  name ("already loaded") until systemd collects it.
 
 Rules:
 - The claude process is the nearest ancestor of the hook whose comm or argv[0]
@@ -203,8 +218,10 @@ def busctl_argv(busctl, name, pids, props, description):
     # A kernel OOM kill of the outlier must not stop the scope, and with it
     # claude: OOMPolicy defaults to stop. A scope that ended failed is
     # collected anyway.
+    # Delegate: AttachProcessesToUnit refuses non-delegated units.
     sv += [("OOMPolicy", "s", "continue"),
-           ("CollectMode", "s", "inactive-or-failed")]
+           ("CollectMode", "s", "inactive-or-failed"),
+           ("Delegate", "b", "true")]
     argv.append(str(len(sv)))
     for key, sig, value in sv:
         argv += [key, sig]
@@ -221,6 +238,31 @@ def start_scope(busctl, name, pids, props, description):
         stdin=subprocess.DEVNULL, capture_output=True,
         timeout=BUSCTL_TIMEOUT_S + 1)
     return proc.returncode == 0
+
+
+def attach(busctl, name, pids):
+    """True if systemd moved all pids into the running unit name."""
+    proc = subprocess.run(
+        [busctl, "--user", "--timeout=%d" % BUSCTL_TIMEOUT_S, "call",
+         "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+         "org.freedesktop.systemd1.Manager", "AttachProcessesToUnit",
+         "ssau", name, "", str(len(pids))] + [str(p) for p in pids],
+        stdin=subprocess.DEVNULL, capture_output=True,
+        timeout=BUSCTL_TIMEOUT_S + 1)
+    return proc.returncode == 0
+
+
+def outside(root, pids, name):
+    """The pids still alive and not in the unit name."""
+    out = []
+    for pid in pids:
+        try:
+            path = cgroup(root, pid)
+        except OSError:
+            continue  # gone
+        if path is not None and not path.endswith("/" + name):
+            out.append(pid)
+    return out
 
 
 def wait_attached(root, pid, name):
@@ -274,12 +316,15 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
 
     name = scope_name(session_id, pid)
     description = "loadguard: claude session %s" % (session_id or pid)
-    # The hook and any shell between it and claude exit in a moment: leave
-    # them out, a PID that vanished fails the whole call.
-    others = [p for p in descendants(root, pid)
-              if p not in chain and p != me]
-    if not start_scope(busctl, name, [pid] + others, props, description):
-        if not others or not start_scope(busctl, name, [pid], props,
-                                         description):
-            return "start-failed"
-    return "attached" if wait_attached(root, pid, name) else "unconfirmed"
+    if not start_scope(busctl, name, [pid], props, description):
+        return "start-failed"
+    if not wait_attached(root, pid, name):
+        return "unconfirmed"
+    # Scanned after the move: what claude forks from now on is inside
+    # already. The hook and any shell between it and claude exit in a moment.
+    others = outside(root, [p for p in descendants(root, pid)
+                            if p not in chain and p != me], name)
+    if others and not attach(busctl, name, others):
+        for other in others:
+            attach(busctl, name, [other])
+    return "attached"

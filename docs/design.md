@@ -52,7 +52,10 @@ dass das nicht tragfähig ist: Freigaben werden am umgeschriebenen Befehl geprü
 Kind-Shell im Scope verliert `cd` und die Snapshot-Funktionen.
 
 Stattdessen: **Der SessionStart-Hook schiebt den `claude`-Prozess selbst in einen
-transienten systemd-User-Scope mit Limits** (D-Bus `StartTransientUnit` mit `PIDs=`).
+transienten systemd-User-Scope mit Limits** (D-Bus `StartTransientUnit` mit `PIDs=`
+nur für `claude`; was `claude` vorher gestartet hat, folgt per
+`AttachProcessesToUnit`, dafür `Delegate=yes` — k12: eine verschwundene PID in `PIDs=`
+lässt die Unit asynchron scheitern, obwohl der Aufruf gelingt).
 Alles, was die Session startet — Bash-Befehle, Subagenten, MCP-Server — erbt den
 Scope. Befehle werden nie umgeschrieben: Freigaben, `cd`, Funktionen, Exit-Codes und
 `run_in_background` bleiben unberührt; pro Bash-Aufruf kostet Stufe 1 nichts.

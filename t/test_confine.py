@@ -33,11 +33,26 @@ MEMINFO_8G = "MemTotal:        8025420 kB\nMemFree:  1155072 kB\n"
 GIB = 1 << 30
 
 # Records argv (one line per call, NUL-separated args), then plays systemd:
-# writes the scope path into the cgroup file of the first PID. FAKE_FAIL=n
-# fails every call with more than n PIDs; FAKE_NOMOVE leaves cgroups alone.
+# StartTransientUnit writes the scope path into the cgroup file of the first
+# PID. FAKE_FAIL=n fails every start with more than n PIDs; FAKE_NOMOVE
+# answers the start but moves nothing, as when systemd fails the unit after
+# the call returned (k12). AttachProcessesToUnit moves every PID, or none
+# and fails if one of them is listed in FAKE_GONE (vanished since the scan).
 FAKE_BUSCTL = r"""#!/bin/sh
 printf '%s\0' "$@" >> "$FAKE_LOG"; echo >> "$FAKE_LOG"
 name=$9; n=0; pid=
+if [ "$7" = AttachProcessesToUnit ]; then
+  shift 11
+  for p; do
+    case " $FAKE_GONE " in *" $p "*)
+      echo "Call failed: No such process" >&2; exit 1;;
+    esac
+  done
+  for p; do
+    printf '0::%s/%s\n' "$FAKE_SLICE" "$name" > "$FAKE_ROOT/proc/$p/cgroup"
+  done
+  exit 0
+fi
 while [ $# -gt 0 ]; do
   if [ "$1" = PIDs ]; then n=$3; pid=$4; break; fi
   shift
@@ -79,7 +94,7 @@ class Tree:
         self.env = {"XDG_RUNTIME_DIR": self.runtime, "PATH": self.bin}
         os.environ.update(FAKE_LOG=self.log, FAKE_ROOT=self.root,
                           FAKE_SLICE=SLICE_PATH)
-        for var in ("FAKE_FAIL", "FAKE_NOMOVE"):
+        for var in ("FAKE_FAIL", "FAKE_NOMOVE", "FAKE_GONE"):
             os.environ.pop(var, None)
 
     def write(self, path, text):
@@ -317,7 +332,7 @@ class BusctlArgv(unittest.TestCase):
             "/usr/bin/busctl", "--user", "--timeout=2", "call",
             "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
             "org.freedesktop.systemd1.Manager", "StartTransientUnit",
-            "ssa(sv)a(sa(sv))", "loadguard-091fbf8e-42.scope", "fail", "9",
+            "ssa(sv)a(sa(sv))", "loadguard-091fbf8e-42.scope", "fail", "10",
             "Description", "s", "loadguard: claude session s",
             "Slice", "s", "app-loadguard.slice",
             "PIDs", "au", "2", "42", "43",
@@ -325,6 +340,7 @@ class BusctlArgv(unittest.TestCase):
             "MemorySwapMax", "t", "0", "CPUWeight", "t", "50",
             "OOMPolicy", "s", "continue",
             "CollectMode", "s", "inactive-or-failed",
+            "Delegate", "b", "true",
             "0"])
 
     def test_scope_name(self):
@@ -348,20 +364,77 @@ class BusctlArgv(unittest.TestCase):
 
 
 class Confine(Base):
-    def test_attaches_claude_and_its_children(self):
+    NAME = "loadguard-091fbf8e-2549533.scope"
+
+    def pids(self, argv):
+        """The PIDs of a recorded StartTransientUnit or AttachProcessesToUnit."""
+        if argv[6] == "AttachProcessesToUnit":
+            return [int(p) for p in argv[11:]]
+        i = argv.index("PIDs")
+        return [int(p) for p in argv[i + 3:i + 3 + int(argv[i + 2])]]
+
+    def in_scope(self, pid):
+        return confine.cgroup(self.t.root, pid) == SLICE_PATH + "/" + self.NAME
+
+    def test_scope_with_claude_alone_then_children(self):
         claude = self.reuben_session()
         self.assertEqual(self.t.confine(2549600), "attached")
-        (argv,) = self.t.calls()
-        name = "loadguard-091fbf8e-%d.scope" % claude
-        self.assertEqual(argv[8], name)  # "$@": busctl itself not recorded
-        i = argv.index("PIDs")
-        # claude and the MCP server tree; not the hook's own shell chain.
-        self.assertEqual(argv[i + 2:i + 6],
-                         ["3", str(claude), "2549700", "2549701"])
-        self.assertEqual(argv[argv.index("MemoryMax") + 2],
+        start, attach = self.t.calls()
+        self.assertEqual(start[6:9], ["StartTransientUnit", "ssa(sv)a(sa(sv))",
+                                      self.NAME])  # "$@": no busctl itself
+        # Only claude in PIDs=: nothing in the call can vanish (k12).
+        self.assertEqual(self.pids(start), [claude])
+        self.assertEqual(start[start.index("MemoryMax") + 2],
                          str(8025420 * 1024 * 40 // 100))
-        self.assertEqual(confine.cgroup(self.t.root, claude),
-                         SLICE_PATH + "/" + name)
+        self.assertEqual(start[start.index("Delegate") + 1:][:2],
+                         ["b", "true"])
+        # Then the MCP server tree; not the hook's own shell chain.
+        self.assertEqual(attach[6:11], ["AttachProcessesToUnit", "ssau",
+                                        self.NAME, "", "2"])
+        self.assertEqual(sorted(self.pids(attach)), [2549700, 2549701])
+        for pid in (claude, 2549700, 2549701):
+            self.assertTrue(self.in_scope(pid), pid)
+        for pid in (2549600, 2549601):
+            self.assertFalse(self.in_scope(pid), pid)
+
+    def test_child_vanished_between_scan_and_attach(self):
+        # Another SessionStart hook: listed by the scan, gone at the call.
+        # systemd fails the whole batch; each live PID still gets its turn.
+        claude = self.reuben_session()
+        self.t.proc(2549610, claude, "sh", ["/bin/sh", "-c", "other-hook"])
+        os.environ["FAKE_GONE"] = "2549610"
+        self.assertEqual(self.t.confine(2549600), "attached")
+        start, batch, *single = self.t.calls()
+        self.assertEqual(self.pids(start), [claude])
+        self.assertEqual(sorted(self.pids(batch)), [2549610, 2549700, 2549701])
+        self.assertEqual(sorted(self.pids(a) for a in single),
+                         [[2549610], [2549700], [2549701]])
+        for pid in (claude, 2549700, 2549701):
+            self.assertTrue(self.in_scope(pid), pid)
+
+    def test_child_gone_before_scan_is_not_asked_for(self):
+        claude = self.reuben_session()
+        self.t.proc(2549610, claude, "sh", ["/bin/sh", "-c", "other-hook"])
+        os.remove(self.t.root + "/proc/2549610/cgroup")  # exited meanwhile
+        self.assertEqual(self.t.confine(2549600), "attached")
+        _, attach = self.t.calls()
+        self.assertEqual(sorted(self.pids(attach)), [2549700, 2549701])
+
+    def test_children_already_inside_are_left_alone(self):
+        # Forked by claude after the move: they inherited the scope.
+        claude = self.reuben_session()
+        scope = SLICE_PATH + "/" + self.NAME
+        self.t.proc(2549700, claude, "npm exec serper", cgroup=scope)
+        self.t.proc(2549701, 2549700, "node", cgroup=scope)
+        self.assertEqual(self.t.confine(2549600), "attached")
+        self.assertEqual(len(self.t.calls()), 1)
+
+    def test_no_children_no_attach(self):
+        self.t.proc(10, 1, "claude")
+        self.t.proc(11, 10, "sh")
+        self.assertEqual(self.t.confine(11), "attached")
+        (start,) = self.t.calls()
+        self.assertEqual(self.pids(start), [10])
 
     def test_idempotent(self):
         claude = self.reuben_session()
@@ -370,7 +443,9 @@ class Confine(Base):
         for _ in range(3):
             self.assertEqual(self.t.confine(2549600, session_id="other"),
                              "already")
-        self.assertEqual(len(self.t.calls()), 1)
+        # One start and one attach from the first; nothing after.
+        self.assertEqual([a[6] for a in self.t.calls()],
+                         ["StartTransientUnit", "AttachProcessesToUnit"])
         self.assertTrue(confine.in_loadguard_scope(
             confine.cgroup(self.t.root, claude)))
 
@@ -385,33 +460,18 @@ class Confine(Base):
         self.assertEqual(self.t.calls(), [])
         self.assertEqual(confine.cgroup(self.t.root, 3001), scope)
 
-    def test_retry_with_claude_alone(self):
-        claude = self.reuben_session()
-        os.environ["FAKE_FAIL"] = "1"  # a child vanished: calls with >1 PID fail
-        self.assertEqual(self.t.confine(2549600), "attached")
-        first, second = self.t.calls()
-        i = second.index("PIDs")
-        self.assertEqual(second[i + 2:i + 4], ["1", str(claude)])
-        self.assertEqual(first[first.index("PIDs") + 2], "3")
-
-    def test_start_failed(self):
+    def test_start_failed_no_retry(self):
         self.reuben_session()
         os.environ["FAKE_FAIL"] = "0"
         self.assertEqual(self.t.confine(2549600), "start-failed")
-        self.assertEqual(len(self.t.calls()), 2)
-
-    def test_start_failed_without_children_no_retry(self):
-        self.t.proc(10, 1, "claude")
-        self.t.proc(11, 10, "sh")
-        os.environ["FAKE_FAIL"] = "0"
-        self.assertEqual(self.t.confine(11), "start-failed")
         self.assertEqual(len(self.t.calls()), 1)
 
     def test_with_linger_as_before(self):
         claude = self.reuben_session()
         self.assertTrue(confine.lingering(self.t.root, UID))
         self.assertEqual(self.t.confine(2549600), "attached")
-        self.assertEqual(len(self.t.calls()), 1)
+        self.assertEqual([a[6] for a in self.t.calls()],
+                         ["StartTransientUnit", "AttachProcessesToUnit"])
         self.assertTrue(confine.in_loadguard_scope(
             confine.cgroup(self.t.root, claude)))
 
@@ -432,14 +492,20 @@ class Confine(Base):
         os.remove(self.t.root + LINGER)
         self.assertEqual(self.t.confine(2549600), "already")
 
-    def test_unconfirmed_move(self):
-        self.reuben_session()
+    def test_async_failure_is_unconfirmed(self):
+        # The live k12 case: busctl returns 0, systemd fails the unit after.
+        # A failure, not a success: no attach into a dead unit, and no second
+        # start, which would hit the failed unit's name or repeat the error.
+        claude = self.reuben_session()
         os.environ["FAKE_NOMOVE"] = "1"
         saved, confine.CONFIRM_S = confine.CONFIRM_S, 0.05
         self.addCleanup(setattr, confine, "CONFIRM_S", saved)
         start = time.monotonic()
         self.assertEqual(self.t.confine(2549600), "unconfirmed")
         self.assertLess(time.monotonic() - start, 1)
+        (argv,) = self.t.calls()
+        self.assertEqual(self.pids(argv), [claude])
+        self.assertFalse(self.in_scope(claude))
 
 
 class FailOpen(Base):
@@ -603,16 +669,26 @@ class RealScope(unittest.TestCase):
             real_scope_possible(), name, [sleeper.pid], props,
             "loadguard: unit test"))
         self.assertTrue(confine.wait_attached("", sleeper.pid, name))
+        # A process started before the scope joins it later (k12).
+        late = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(late.wait)
+        self.addCleanup(late.kill)
+        self.assertTrue(confine.attach(real_scope_possible(), name,
+                                       [late.pid]))
+        self.assertTrue(confine.cgroup("", late.pid).endswith("/" + name))
         self.assertTrue(confine.cgroup("", sleeper.pid).endswith(
             "/app-loadguard.slice/" + name))
         shown = self.systemctl("show", name, "-p", "MemoryHigh", "-p",
                                "MemoryMax", "-p", "MemorySwapMax", "-p",
-                               "CPUWeight", "-p", "OOMPolicy").stdout
+                               "CPUWeight", "-p", "OOMPolicy", "-p",
+                               "Delegate").stdout
         for line in ("MemoryHigh=16777216", "MemoryMax=33554432",
-                     "MemorySwapMax=0", "CPUWeight=10", "OOMPolicy=continue"):
+                     "MemorySwapMax=0", "CPUWeight=10", "OOMPolicy=continue",
+                     "Delegate=yes"):
             self.assertIn(line, shown.splitlines())
-        sleeper.kill()
-        sleeper.wait()
+        for proc in (sleeper, late):
+            proc.kill()
+            proc.wait()
         deadline = time.monotonic() + 5
         while self.systemctl("list-units", "--all", "--no-legend",
                              name).stdout.strip():

@@ -7,20 +7,26 @@
   (github.com/Getty/loadguard). Title image still pending.
 - SessionStart now confines each session: a new hook (`hooks/loadguard-confine`,
   `lib/loadguard/confine.py`) moves the claude process into its own systemd
-  user scope (`app-loadguard.slice/loadguard-<session>-<pid>.scope`) via
-  `busctl StartTransientUnit`, with `MemoryHigh`/`MemoryMax`/`MemorySwapMax` at
-  30/40/10% of `MemTotal` and `CPUWeight` 50 — tunable through
-  `LOADGUARD_MEMORY_HIGH`, `LOADGUARD_MEMORY_MAX`, `LOADGUARD_MEMORY_SWAP_MAX`
-  and `LOADGUARD_CPU_WEIGHT`. `OOMPolicy=continue` keeps a kernel OOM kill of
-  the outlier from ending the scope, and with it claude. Commands are never
-  rewritten. A session already inside a `loadguard-*.scope` (resume/compact, a
-  nested `claude -p`) is left alone; without systemd, cgroup v2 memory
-  delegation, a user bus, or **linger** (`/var/lib/systemd/linger/$USER`) the
-  session runs unconfined — without linger the user manager, and with it the
-  scope, would not outlive a `claude` left running in `screen`/`tmux` past the
-  last logout. `LOADGUARD_CONFINE=0` (only that exact value) turns confinement
-  off outright. Covered by 52 tests against a fixture `busctl` and one live
-  scope around a real `sleep`.
+  user scope (`app-loadguard.slice/loadguard-<session>-<pid>.scope`), with
+  `MemoryHigh`/`MemoryMax`/`MemorySwapMax` at 30/40/10% of `MemTotal` and
+  `CPUWeight` 50 — tunable through `LOADGUARD_MEMORY_HIGH`,
+  `LOADGUARD_MEMORY_MAX`, `LOADGUARD_MEMORY_SWAP_MAX` and
+  `LOADGUARD_CPU_WEIGHT`. `busctl StartTransientUnit` carries the claude PID
+  alone, with `Delegate=yes`; descendants claude already started (MCP
+  servers) are moved in afterwards with `AttachProcessesToUnit`, one PID at a
+  time if the batch fails — a PID still listed when systemd moves it can
+  vanish first and fail the whole unit asynchronously while the call itself
+  still returns success, which counts as `unconfirmed`. `OOMPolicy=continue`
+  keeps a kernel OOM kill of the outlier from ending the scope, and with it
+  claude. Commands are never rewritten. A session already inside a
+  `loadguard-*.scope` (resume/compact, a nested `claude -p`) is left alone;
+  without systemd, cgroup v2 memory delegation, a user bus, or **linger**
+  (`/var/lib/systemd/linger/$USER`) the session runs unconfined — without
+  linger the user manager, and with it the scope, would not outlive a
+  `claude` left running in `screen`/`tmux` past the last logout.
+  `LOADGUARD_CONFINE=0` (only that exact value) turns confinement off
+  outright. Covered by 54 tests against a fixture `busctl` and a live scope
+  around a real `sleep`.
 - Repo scaffold: design, agent team, karr board.
 - PreToolUse hook on Bash is now a compiled C binary
   (`src/loadguard-hook.c`, vendored cJSON v1.7.19 in `vendor/cJSON/`) instead
