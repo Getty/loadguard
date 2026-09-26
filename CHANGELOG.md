@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.1 - 2026-09-26
+
 - README.md (problem, mechanism, stages, status) and LICENSE (Artistic 2.0,
   Copyright (c) 2026 Torsten Raudssus) added; the repo is public
   (github.com/Getty/loadguard). Title image still pending.
