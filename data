@@ -1,0 +1,25 @@
+---
+claimed_at: 2026-09-26T02:55:04Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-26T02:54:55Z
+created: 2026-09-26T02:49:25Z
+depends_on:
+- 3
+id: 10
+priority: high
+started: 2026-09-26T02:54:55Z
+status: done
+tags:
+- confine
+title: 'Stufe 1: ohne Linger nicht einsperren + LOADGUARD_CONFINE=0'
+updated: 2026-09-26T02:55:04Z
+---
+
+Getty 2026-09-26: (1) Ohne /var/lib/systemd/linger/$USER (Pfad gegen systemd/loginctl-Doku prüfen) bleibt die Session, wo sie ist — Status-Wort wie die anderen fail-open-Fälle. Grund: claude in screen/tmux stürbe beim letzten Logout mit dem User-Manager. (2) LOADGUARD_CONFINE=0 → nicht einsperren. Tests gegen Fixture-Wurzel. Verschachtelung bleibt wie ist (im Eltern-Scope). Siehe docs/design.md Stufe 1.
+
+2026-09-26 02:50 Linger path verified on reuben (systemd 257): systemd-logind.service has StateDirectory=systemd/linger, logind enumerates /var/lib/systemd/linger/ and user_check_linger_file tests existence of <dir>/<user_name> (strings in libsystemd-shared; upstream logind-user.c access F_OK). No man pages on the host. Plan: disabled check first (only exact '0' is off), linger check after the already-check so a nested claude still reports 'already'.
+
+2026-09-26 02:51 Done: confine() returns 'disabled' when LOADGUARD_CONFINE is exactly '0' (checked before any /proc read; every other value, incl. '', 'false', ' 0', keeps confinement on: a typo never drops the protection). New lingering(root, uid): uid -> pwd name, existence of root+/var/lib/systemd/linger/<name>; no file / unknown uid -> 'no-linger'. Checked after 'already', so a nested claude -p in a confined parent still reports 'already'. Tests in t/test_confine.py: fixture tree now carries the linger file (pwd.getpwuid mocked to getty), new cases for disabled, disabled-first, non-zero values, no linger, other user's linger only, no linger dir, uid without passwd entry, with-linger-as-before, nested-without-linger. python3 -m unittest discover -s t -v: 115 tests OK, none skipped. Not committed; CHANGELOG left to the release manager.
+
+2026-09-26 02:55 Committed aeb4ae5 (lib/loadguard/confine.py, t/test_confine.py, docs/design.md Stufe-1 note, CHANGELOG.md). The Stufe-2 /proc-scan design decision from the same design.md diff was unrelated to this card, split into its own commit 00d7f0a. 115 tests green under nice -n 19. Not pushed.
