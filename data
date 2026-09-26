@@ -1,0 +1,43 @@
+---
+claimed_at: 2026-09-26T02:24:32Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-26T02:24:24Z
+created: 2026-09-25T23:37:13Z
+depends_on:
+- 1
+- 7
+- 8
+id: 3
+priority: high
+started: 2026-09-26T01:43:14Z
+status: done
+tags:
+- confine
+title: 'Stufe 1: claude-Session per SessionStart in einen systemd-Scope mit Limits'
+updated: 2026-09-26T02:24:32Z
+---
+
+updatedInput mit systemd-run --user --scope + Memory/CPU/IO-Limits. Quoting-Tests (Heredoc, Quotes, && , cd, Subshell), run_in_background, Exit-Code-Treue. Delegation einmal pro Boot prüfen + cachen. Fallback ohne systemd: durchlassen. Siehe docs/design.md Stufe 1.
+
+2026-09-26 00:19 Getty 2026-09-26: Einwickeln passiert im C-Binary (k8); updatedInput-Semantik aus k7 verwenden.
+
+2026-09-26 01:48 Befund lokal (Emulation der exakten Claude-Code-2.1.283-Befehlsform aus /proc/$$/cmdline: bash -c 'source <snapshot> && … && eval <cmd> && pwd -P >| /tmp/claude-XXXX-cwd'): Einwicklung in systemd-run … -- bash -c verliert cd (cwd wird vom äußeren Shell per pwd -P nachgeführt) und die Snapshot-Funktionen (nvm: type -t nvm leer) sowie expand_aliases. Exit-Code (exit 3) bleibt, Eltern-Prozess ist die äußere bash (Tree-Kill erreicht den Scope). Env persistiert im Bash-Tool ohnehin nicht (frische bash pro Aufruf). Live-Bestätigung folgt.
+
+2026-09-26 01:52 LIVE Session 1 (haiku, $0.020, 2 turns): async-SessionStart-Build allein reicht — Binary ~0.8 s nach Sessionstart in ~/.claude/plugins/data/loadguard-inline/bin (Exec-Form args + CLAUDE_PLUGIN_DATA funktionieren bei --plugin-dir), erster Bash-Aufruf schon eingewickelt. ABER: Rechteprüfung läuft auf dem UMGESCHRIEBENEN Befehl. --allowedTools 'Bash(cat /proc/self/cgroup)' → permission_denials.tool_input.command = '/usr/bin/systemd-run … -- /bin/bash -c '\''cat /proc/self/cgroup'\''' → denied. k7-Schluss ('Freigaben am Original geprüft') war ein Artefakt: echo ist in Claude Code ohnehin read-only-auto-erlaubt. Blocker für 'alles einwickeln'.
+
+2026-09-26 01:55 LIVE Session 2 (haiku, $0.051, 10 turns; --allowedTools nur die exakten EINGEWICKELTEN Strings, keine Originale → 0 denials, damit belegt: Prüfung nur am umgeschriebenen Befehl). Befunde: cgroup run-p…scope ✓; 'cd sub' dann 'pwd' → altes cwd (cd VERLOREN); export → printenv exit 1 (Env persistiert im Bash-Tool auch ohne loadguard nicht: frische bash pro Aufruf); 'exit 3' → Exit code 3 ✓; 'type -t nvm' → exit 1 (Snapshot-Funktionen VERLOREN, ohne Wrap: 'function'); run_in_background ✓ (bg.txt zeigt run-*.scope); Timeout live nicht testbar (Harness blockt 'sleep 30' vor dem Hook), lokal emuliert: Tree-Kill erreicht Scope-Prozesse (ppid-Kette bleibt, systemd-run exect), Scope danach inactive. OOM lokal: MemoryMax=32M/SwapMax=0, 64 MB → rc 137 ✓. Quoting-Roundtrip lokal ✓ (argv byte-gleich; nur Syntaxfehlermeldungen sagen '-c:' statt 'eval:'). Aufgeräumt: projects/…live1/2, Task-Output, data/loadguard-inline/bin+build.log.
+
+2026-09-26 01:55 Also found: docs/design.md Z.36-39 und loadguard-core SKILL.md Z.25+49 ('Freigaben am Originalbefehl geprüft', k7) sind falsch — k7s Rewrite war echo (read-only auto-allow). Nicht angefasst. Prototyp (Quoting, Skip-Fälle, Delegations-Cache, Limits 25/35/10 % MemTotal, CPU/IOWeight 50) als Patch: scratchpad k3-wrap-prototype.patch; Arbeitsbaum auf HEAD zurückgesetzt, 65 Tests grün.
+
+2026-09-26 02:07 Getty 2026-09-26: Option A — Session-Scope statt Befehls-Rewrite. SessionStart schiebt den claude-Prozess per D-Bus StartTransientUnit (PIDs=) in einen Scope mit MemoryHigh/Max/SwapMax/CPUWeight. Befehle werden nie umgeschrieben. Siehe docs/design.md Stufe 1 (neu).
+
+2026-09-26 02:12 Worker gestartet (Option A). Plan: lib/loadguard/confine.py + hooks/loadguard-confine (eigener async SessionStart-Hook), busctl StartTransientUnit, Slice app-loadguard.slice, OOMPolicy=continue (Default stop würde bei OOM-Kill des Ausreißers den ganzen Scope samt claude stoppen), updated_input() raus.
+
+2026-09-26 02:18 LIVE (Claude Code 2.1.283, haiku, 2 Sessions, zusammen $0.036). S1 ($0.014, 2 turns): Scope loadguard-f8f93270-2692670.scope in app-loadguard.slice, systemctl show: MemoryHigh=2465565081 MemoryMax=3287420108 MemorySwapMax=821855027 CPUWeight=50 OOMPolicy=continue; beide SessionStart-Hooks stdout leer, exit 0; nach Session-Ende Scope weg (journal: Consumed 1.0s CPU, 43.2M peak). 1 Denial, aber NICHT loadguard: Claude Codes Pfadprüfung ('cat in /proc/<claude-pid>/cgroup … only from allowed working directories'), PreToolUse-Hook-Antwort leer. S2 ($0.023, 5 turns, --add-dir /proc, allowedTools = Originalbefehle): cat /proc/self/cgroup → 0::/…/app-loadguard.slice/loadguard-d51aa5b4-2694000.scope; cd sub, dann pwd → …/live2/sub (cd bleibt); exit 3 → 'Exit code 3'; permission_denials []; Scope nach Ende weg. Timing: busctl-Call 10 ms, Umzug bestätigt nach ~30 ms, /proc-Scan 6 ms, Entry-Start ~50-65 ms; Scope-Start laut journal/Watcher 0,6 s (S1) bzw. 3,6 s (S2, mit --add-dir /proc) nach Prozessstart — in beiden Sessions kam hook_response SessionStart vor init und vor dem ersten Bash. Befund: cgroup v2 zieht Speicherladungen beim Umzug nicht mit — was claude vor dem Attach allokiert hat, bleibt session-2.scope angerechnet (peak im Scope 43-51 MB). Aufgeräumt: projects/…live1/2, data/loadguard-inline/{bin,build.log}, Scratch-Dirs; alter failed run-p2663059-…scope des Vorgängers per reset-failed entfernt.
+
+2026-09-26 02:19 Also found: loadguard-core SKILL.md → Confinement sollte OOMPolicy=continue (Default stop killt bei OOM den ganzen Scope samt claude), app-loadguard.slice und die Regel 'schon in loadguard-*.scope → nichts' festhalten. Nicht angefasst (Skill-Pflege).
+
+2026-09-26 02:19 Done: SessionStart-Hook hooks/loadguard-confine + lib/loadguard/confine.py schiebt claude (+ bestehende Nachkommen) per busctl StartTransientUnit in app-loadguard.slice/loadguard-<sid8>-<pid>.scope (MemoryHigh 30 %, MemoryMax 40 %, SwapMax 10 % MemTotal, CPUWeight 50, OOMPolicy=continue, CollectMode=inactive-or-failed); schon in loadguard-*.scope → nichts (Idempotenz + Verschachtelung); fail-open, Output leer. updated_input()-Builder samt Treiber-Modus und Tests entfernt (Befehle werden nie umgeschrieben, k4 verweigert nur); test_updated_input.py (Plattform-Fakt aus k7) bleibt. Verifiziert: 106 Tests grün, 0 skipped (inkl. echtem Scope um sleep mit 32M-Limit); live 2 Sessions $0.036: Scope in /proc/self/cgroup, Limits in systemctl show, cd bleibt, exit 3 bleibt 3, 0 Denials mit Originalbefehlen, Scope nach Ende weg.
+
+2026-09-26 02:24 Release manager: committed as e2388b6 (Confine each claude session in a systemd scope on SessionStart) and ef1d8e4 (Remove the unused updatedInput builder from the C hook). CHANGELOG.md Unreleased entry added for the session limits and LOADGUARD_* env vars. 106 tests green post-commit (nice -n 15 python3 -m unittest discover -s t). Moved to done. Not pushed.
