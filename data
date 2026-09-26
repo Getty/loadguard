@@ -1,0 +1,30 @@
+---
+class: standard
+completed: 2026-09-26T05:27:57Z
+created: 2026-09-25T23:37:18Z
+depends_on:
+- 2
+- 8
+id: 5
+priority: medium
+started: 2026-09-26T04:58:52Z
+status: done
+tags:
+- cli
+title: 'CLI: loadguard status / doctor / explain'
+updated: 2026-09-26T05:27:57Z
+---
+
+bin/loadguard. status = PSI, zram, Slots + Halter. doctor = cgroup-Delegation, systemd-run, Schwellwerte. explain CMD = Entscheidung des Hooks trocken.
+
+2026-09-26 00:19 Getty 2026-09-26: CLI bleibt Python; explain ruft das C-Binary, damit die Entscheidungslogik nur einmal existiert.
+
+2026-09-26 05:05 Worker start. Verified in the Claude Code docs (plugins-reference, plugins/loading, 2026-09-26): bin/ is on the Bash tool's PATH while the plugin is enabled; CLAUDE_PLUGIN_ROOT/CLAUDE_PLUGIN_DATA are NOT in the Bash tool's environment; data dir = <plugins>/data/<id>, id = <name>@<origin> with every char outside [A-Za-z0-9_-] -> '-' (loadguard@getty -> loadguard-getty, --plugin-dir -> loadguard@inline -> loadguard-inline; both exist on reuben); installed copies live in <plugins>/cache/<marketplace>/<plugin>/<version>/. Plan: binary gets --report/--explain (argc==2, JSON via cJSON), objection() split so both modes run the same code; CLI in lib/loadguard/cli.py + thin bin/loadguard.
+
+2026-09-26 05:19 Implemented: C binary has --report (status, no stdin read) and --explain (payload on stdin), one JSON line each; objection() split into objection()+no_room() filling a struct verdict, hook() and both reports call them. Any other argv = hook as before. Driver: report ROOT / explain ROOT. CLI: lib/loadguard/cli.py + bin/loadguard. Decisions: under pressure status does not scan (same as the hook; says so) + 10 s subprocess timeout without wait; binary lookup = CLAUDE_PLUGIN_DATA > own install dir (cache/<mkt>/<plugin>/<ver> -> data/<plugin>-<mkt>) > checkout build/ > data/loadguard-inline — no loadguard-* glob, it cannot tell loadguard@getty from @inline. Cost (1500 interleaved calls vs HEAD): light 0.609 -> 0.605 ms, heavy 4.002 -> 4.003 ms. Tests: 205 green, none skipped. Docs next.
+
+2026-09-26 05:23 Also found (outside this card): CLAUDE.md layout row for src/loadguard-hook.c still says 'Pass-through' although the hook denies since k4 — left as is (no path changed). Residual in status under thrash: session() walks ancestors via confine.find_claude, which reads the cmdline of the bash wrapper between CLI and claude (comm first; claude itself is found by comm) — bounded by 8 levels, the wrapper is the CLI's live parent.
+
+2026-09-26 05:23 Done. src/loadguard-hook.c: read-only report modes --report (no stdin) and --explain (payload on stdin), one JSON line each, built from objection()/no_room() (struct verdict records how far they got); hook mode = every other call, unchanged (1500 interleaved calls vs HEAD: light 0.609->0.605 ms, heavy 4.002->4.003 ms). Driver: report ROOT / explain ROOT. New bin/loadguard + lib/loadguard/cli.py (status, explain, doctor; exit 1 on any FAIL); confine.py: disabled/user_bus/find_busctl pulled out of confine(); build.py: current(). Under pressure status does not scan (as the hook) + 10 s timeout. Binary lookup: CLAUDE_PLUGIN_DATA > own install's data dir > checkout build/ > data/loadguard-inline. Verified: nice python3 -m unittest discover -s t -v -> 205 OK, none skipped (43 new: t/test_cli.py 30, t/test_throttle.py Report 11 + LiveHost 2); test_explain_is_the_hook fails 16x on a mutant with a second decision path; make builds without warnings. Docs: design.md 'Umgesetzt (k5)', README CLI section, SKILL.md 'CLI (k5)', CHANGELOG, CLAUDE.md lib row. Not committed.
+
+2026-09-26 05:27 Committed 84fdd45 (Add loadguard status/doctor/explain on read-only report modes of the hook binary). 205 tests OK, none skipped, verified before commit.
