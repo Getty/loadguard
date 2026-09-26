@@ -1,0 +1,33 @@
+---
+claimed_at: 2026-09-26T05:52:50Z
+claimed_by: loadguard
+class: standard
+completed: 2026-09-26T05:52:50Z
+created: 2026-09-25T23:37:20Z
+depends_on:
+- 2
+id: 6
+priority: low
+started: 2026-09-26T05:28:20Z
+status: done
+tags:
+- context
+title: 'Stufe 4: Lage-Zeile in den Kontext nur bei erhöhter Last'
+updated: 2026-09-26T05:52:50Z
+---
+
+UserPromptSubmit/SessionStart: eine Zeile nur oberhalb der Schwelle, sonst null Output.
+
+2026-09-26 00:19 Getty 2026-09-26: Lage-Signal wie k4 (memory full avg10 + Swap gesamt), nicht zram-Füllgrad.
+
+2026-09-26 05:33 Docs (code.claude.com/docs/en/hooks.md, fetched 2026-09-26): UserPromptSubmit and SessionStart both take plain stdout AND hookSpecificOutput.additionalContext into Claude's context (system reminder; UserPromptSubmit alongside the prompt, SessionStart before the first prompt). Async hooks are NOT dropped: 'After the background process exits, Claude Code delivers the additionalContext and systemMessage fields ... on the next conversation turn' - but -p kills them at teardown and timing is 'next turn', so the context hook is sync. Exit 2 on UserPromptSubmit blocks and erases the prompt; SessionStart exit 2 only shows stderr to the user. Timed-out UserPromptSubmit hook: output discarded, prompt proceeds (default timeout 30 s there). Docs advise factual statements, not imperative system-style text (prompt-injection defenses). Cap 10,000 chars. Plan: JSON additionalContext form for both (Codex-compatible key set), C binary branches on hook_event_name, pressure half of no_room() factored out and shared; LOADGUARD_THROTTLE=0 silences the line too.
+
+2026-09-26 05:40 Implemented in src/loadguard-hook.c: hook() branches on hook_event_name (UserPromptSubmit|SessionStart -> situation(), else the unchanged Bash path). Pressure half of no_room() factored out as under_pressure() and shared; figures formatting factored out of measures() as pressure_figures() (deny text byte-identical, existing exact-reason tests green). deny() generalized to respond(kv pairs). hooks.json: sync SessionStart + UserPromptSubmit entries, same starter, exec form, timeout 5. Line length 215 at thrash figures, 218 worst case (test bound 220) - trimmed from 233 to stay near the ~200 target. Cost (1500 alternating runs vs HEAD, nice): PreToolUse light 0.559 -> 0.555 ms, heavy 4.139 -> 4.130 ms (unchanged); UserPromptSubmit calm 0.606 ms, SessionStart 0.675 ms, forced line 0.600 ms. Suite: 225 tests OK, none skipped.
+
+2026-09-26 05:43 Also found (not changed, outside the card): (1) k4 deny reason under PRESSURE advises `prove -l t/foo.t` instead of `-r` - that is itself heavy and gets refused under pressure too (advice() picks by kind, not by pressure vs slots); only right for the slots case. The context line therefore names `perl -Ilib t/x.t`. (2) CLAUDE.md layout table is stale: hooks.json row lacks UserPromptSubmit/the sync SessionStart entry, src/loadguard-hook.c row still says 'Pass-through' (stale since k4) - not a worker file. (3) Subagents get no line: UserPromptSubmit does not fire for them; SubagentStart also takes additionalContext (docs) if wanted later. (4) Output channel is docs-verified only, no live recording (host rules: no test sessions against the live install); event fixtures in t/fixtures/events/ are reconstructed from the docs examples, not recorded like k7.
+
+2026-09-26 05:43 Done: stage 4 context line. src/loadguard-hook.c: hook() branches on hook_event_name; UserPromptSubmit/SessionStart -> situation(): under_pressure() (first half of no_room(), shared) and not LOADGUARD_THROTTLE=0 -> one line as hookSpecificOutput.additionalContext, else no byte. Full slots alone: no line, no /proc scan on this path. pressure_figures() factored out of measures() (deny text unchanged), deny() generalized to respond(). hooks.json: sync SessionStart + UserPromptSubmit entries on the existing starter, exec form, timeout 5. Verified: nice python3 -m unittest discover -s t -v -> 225 OK, 0 skipped (20 new tests + Calibration now also checks the line on all 54 snapshots: 37 thrash get it, 20 calm none); make + -Werror -Wpedantic clean. Cost vs HEAD (1500 alternating runs): PreToolUse light 0.559->0.555 ms, heavy 4.139->4.130 ms; UserPromptSubmit 0.61 ms, SessionStart 0.68 ms. Docs: design.md 'Umgesetzt (k6)', README, SKILL.md, CHANGELOG, t/fixtures/README.md.
+
+2026-09-26 05:48 k6 korrigiert auch den k4-Rat (k4 unveröffentlicht, deshalb hier), auf Anweisung des Koordinators: Unter Druck rät weder der Deny-Grund noch die Lage-Zeile zu einem Testlauf - auch keine einzelne Datei, und kein Befehl, den der Klassifizierer durchlässt (der erste Entwurf der Zeile nannte perl -Ilib t/x.t: das hätte der KI den Weg um den Wächter gezeigt; ein perl-Einzeiler nahm 3,8 GB, 20260917-175030). Deny unter Druck: 'Wait and retry later; light commands (git status, ls, cat) still run.' (+ claude-Satz bei K_CLAUDE). Bei vollen Slots bleibt der Rat je Muster, ehrlich formuliert als Rat für den nächsten Versuch: 'When you retry, run fewer tests: prove -l t/foo.t instead of -r' / 'When you retry, run a single test file instead of the whole suite' - auch der kleine Lauf ist schwer und braucht einen Slot. Neue Zeile (213 Zeichen, max 216): '... Heavy commands refused until it eases: prove, make test, builds, new claude -p/--bg. Light commands still run; see loadguard status.' Tests: 226 OK, 0 skipped (neu test_no_test_run_advised_under_pressure über alle HEAVY-Befehle). design.md k4+k6, README, CHANGELOG, SKILL.md angepasst.
+
+2026-09-26 05:52 2026-09-26 05:52 Committed 810a5e3 (Add memory-pressure context line to prompts and session start, k6). Tests: 226 OK, 0 skipped, verified before commit. Includes the k4 CHANGELOG correction and the CLAUDE.md layout-table update, named in the commit body.
