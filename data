@@ -1,0 +1,44 @@
+---
+claimed_at: 2026-09-26T23:12:41Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-26T23:12:41Z
+created: 2026-09-26T22:09:09Z
+id: 15
+priority: high
+started: 2026-09-26T22:09:32Z
+status: done
+tags:
+- learn
+- hook
+- cli
+title: 'Lernliste: exakte Befehle, die ≥ 20 % RAM zogen, gelten als schwer'
+updated: 2026-09-26T23:12:41Z
+---
+
+Design: docs/design.md → "Lernliste (entschieden 2026-09-27)" — Getty hat A (Beobachter pro Session), 20 % und die geänderte Invariante (leichter Pfad liest die Lernliste) freigegeben.
+
+Umfang:
+1. C: Modus --watch (Beobachter pro Scope, 2-s-Takt, flock pro Scope, endet mit dem Session-Prozess, schreibt beim ersten Reißen der Schwelle, danach nur bei ≥ 10 % mehr und am Ende). Extraktion des Befehls aus der obersten <shell> -c|-lc unter dem Session-Prozess: Claude-Code-Wrapper (eval-Text, '\\''-entschärft) und Codex (argv[2]). Eine Implementierung für Beobachter und Slot-Scan.
+2. C: Hook liest learned.jsonl (XDG_STATE_HOME), exakter Treffer = schwer mit Grund "learned …" (Spitze, Datum); laufende gelernte Befehle halten einen Slot. Fail-open bei kaputter/zu großer Datei.
+3. hooks/loadguard-confine startet den Beobachter nach dem Einsperren (nur mit Binary, nicht bei LOADGUARD_LEARN=0). hooks.json bleibt unverändert.
+4. Env: LOADGUARD_LEARN_RSS (Default 20, 1–100), LOADGUARD_LEARN=0.
+5. CLI: loadguard learned, forget <n>|--all; explain und doctor ergänzt.
+6. Fixtures: echte Claude-Code-Wrapper-Zeilen für Befehle mit Quotes, Zeilenumbruch, Heredoc, run_in_background — live aufzeichnen durch Lesen der eigenen Wrapper-cmdline (sleep-Befehle, keine Last). Codex-Kette aus den k11-Fixtures ableiten.
+7. Doku: README (Abschnitt, Konfig-Tabelle, CLI), design.md "Umgesetzt (k15)", SKILL.md, CHANGELOG (Unreleased).
+
+Fertig, wenn: alle Tests grün, keiner übersprungen; Kosten des leichten Pfads mit leerer und mit 100-Einträge-Liste gemessen (gegen HEAD); Beobachter-Takt gemessen; nie echte Last erzeugt.
+
+2026-09-26 22:20 Recorded own Bash wrapper cmdlines live (Claude Code 2.1.283, read-only via /proc/$PPID/cmdline, 8 cases). Finding: the wrapper escapes a single quote as '"'"' (close, double-quoted quote, reopen), NOT '\''; design.md's '\'' is wrong on this version. Also: ' < /dev/null' is appended after the eval word except when the command has a heredoc or its own '< /dev/null'. Plan: parse the eval argument as one shell word of '…', "…" and \x pieces (covers both escape styles), anchored on the ' && pwd -P >| …-cwd' suffix; anything else = unknown form, nothing learned.
+
+2026-09-26 22:30 C side written: claude_eval()/shell_command() (one extraction for watcher and slot scan), learned list read (O_NONBLOCK+fstat, 1 MiB cap, 256 lines), K_LEARNED in objection() and process_kind(), --watch PID watcher (2 s tick, flock <runtime>/loadguard/<scope>.watch, exits when the scope owner is gone / start time changes), learned_update() under flock learned.lock, tmp+fsync+rename. 10 recorded wrappers (t/fixtures/shells/claude-code.json) extract byte-equal to the commands sent.
+
+2026-09-26 22:35 Also found (design premise): in all three incidents (20260912-224340, 20260917-213244, 20260921-051828) '/usr/bin/perl t/json_data.t' (3.2-3.7 GB RSS; 09-17 reached 3746216 kB = 46.6 %) is the child of MakeMaker's test harness ('perl -MExtUtils::Command::MM -MTest::Harness -e ... test_harness(...)'), i.e. it ran under 'make test' - which the fixed list already calls heavy - not 'directly with perl' as design.md's Lernliste section says. The snapshots do not show the shell/command above the harness. Learning still covers commands outside the list; the design's motivating example is overstated. Not changed in design.md's decided text; flagged for the orchestrator.
+
+2026-09-26 22:56 Tests + docs written: t/test_learn.py (extraction on the 10 recorded wrappers + Codex, watcher passes on fixture trees, hook/slots/explain/report with a list, launcher on test_confine's fake host, CLI learned/forget, one real-scope watcher run), doctor learning tests in t/test_cli.py, CodexRuns stubs learn.py, hooks.json SHA-256 pinned. design.md 'Umgesetzt (k15)' (also corrects the '\'' claim with the recorded '"'"'), README, SKILL.md, CHANGELOG, fixtures README. Measured light path HEAD 0.579 -> 0.585 ms (no list) / 0.713 ms (100 entries, 19 KB) / 0.939 ms (100 x 1 KiB); heavy 5.716 -> 5.739 / 5.911 ms; watcher tick 27 us (1 proc) to 0.9 ms (34 procs). CLAUDE.md layout table not touched (not mine to change): it lacks learn.py, --watch, learned/forget.
+
+2026-09-26 22:58 Found (limits Codex learning): bash 5.2 execs the last command of a -c string (checked on reuben with harmless sleeps: 'bash -c sleep 2' and 'bash -c "cd /tmp && sleep 2"' leave only sleep; 'sleep 2; true' keeps bash). Codex runs calls as bash -c <cmd> (after the snapshot script's exec), so a lone command or 'cd x && cmd' has NO shell process to read the text from -> not learned under Codex; only calls that keep bash (pipelines, ';' lists, loops) are. Claude Code is unaffected: its wrapper ends in '&& pwd -P >| ...' after the eval (recorded). Pinned by test_codex_lone_command_leaves_no_shell, documented in design.md. Side note: k11's procs/codex-session.json (bash 7203 -> prove 7204 for 'prove -lr t/') is therefore likely not what Codex really shows; slot counting is unaffected (argv judged).
+
+2026-09-26 23:02 Done: learned list per design.md 'Lernliste'. C: shell_command()/claude_eval() (one extraction, watcher + slot scan), K_LEARNED in objection() and process_kind(), list read O_NONBLOCK+fstat (<=1 MiB, <=256 lines, else empty), --watch PID (2 s, flock <runtime>/loadguard/<scope>.watch, ends with the scope owner, stat+statm only, cmdline once, write at crossing/+10 %/end, flock learned.lock + tmp/fsync/rename, <=100 entries), --report 'learn', driver modes extract/watch. Python: lib/loadguard/learn.py (start after attached/already, fork+setsid like the build, AttachProcessesToUnit after attached; list read/forget; watcher lookup), hooks/loadguard-confine starts it, CLI learned/forget + explain wording + doctor 'learning' section. hooks.json byte-identical (hash pinned). Verified: make clean && make OK; 328 tests OK, 0 skipped (incl. one real-scope watcher run: second watcher exits at once, watcher gone <=2 s after the session, scope collected, <0.2 s CPU). Measured (reuben, 1500 alternating runs vs HEAD): light 0.579 -> 0.585 ms no list, 0.713 ms 100 entries, 0.939 ms 100x1 KiB; heavy 5.716 -> 5.739/5.911 ms; watcher tick 27 us-0.9 ms (1-34 procs). Open: Codex live (argv[2]; bash execs lone commands -> not learned under Codex), recorded escape is '"'"' not '\'' (design corrected), incident premise (json_data.t ran under make test), CLAUDE.md layout table not updated (not mine).
+
+2026-09-26 23:12 Committed eeab498 (Learn heavy commands by exact text from a per-session watcher (k15)) and d3e2e8d (Release 0.2.0). 328 tests OK, 0 skipped.
