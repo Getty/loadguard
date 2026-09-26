@@ -23,14 +23,15 @@ Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 | Pfad | Inhalt |
 |---|---|
 | `.claude-plugin/plugin.json` | Plugin-Manifest |
-| `hooks/hooks.json` | Hook-Registrierung (SessionStart-Build, PreToolUse auf Bash) |
+| `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build, PreToolUse auf Bash) |
 | `hooks/loadguard` | sh-Starter: `exec` des C-Binarys, ohne Binary `exit 0` |
+| `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits |
 | `hooks/loadguard-build` | SessionStart: baut das Binary nach `${CLAUDE_PLUGIN_DATA}/bin/`, abgekoppelt |
-| `src/loadguard-hook.c` | Hook-Pfad in C (Pass-through, `updatedInput`-Builder) |
+| `src/loadguard-hook.c` | Hook-Pfad in C (Pass-through; schreibt Befehle nie um) |
 | `vendor/cJSON/` | cJSON unverändert, Version und SHA256 in `README` |
 | `Makefile` | `make` → `build/bin/`, `make test`, `make clean` |
 | `bin/loadguard` | CLI (`status`, `doctor`, `explain`) |
-| `lib/loadguard/` | Python für CLI, Build und Tests (`snapshot.py`: Messung, `build.py`: Build/Staleness) |
+| `lib/loadguard/` | Python für CLI, Build und Tests (`snapshot.py`: Messung, `build.py`: Build/Staleness, `confine.py`: Session-Scope) |
 | `t/` | Tests (`python3 -m unittest discover -s t -v`), Fixtures aus `~/load-incidents/` |
 
 Hook-Pfad in C (vendored cJSON, Build beim ersten Lauf, fail-open ohne Binary);

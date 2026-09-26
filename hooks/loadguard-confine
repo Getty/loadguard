@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+# loadguard — SessionStart hook: confine the claude session (k3, stage 1).
+#
+# Moves the claude process that runs this hook into a transient systemd user
+# scope with memory/CPU limits; see lib/loadguard/confine.py. Prints nothing
+# (zero context cost) and exits 0 whatever happens: the session always
+# starts, confined or not.
+#
+#   loadguard-confine            as a hook: payload on stdin
+#   loadguard-confine --status   same, print the status word (for debugging)
+
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def main(argv):
+    try:
+        payload = json.load(sys.stdin)
+        session_id = payload.get("session_id") if isinstance(payload, dict) \
+            else None
+    except ValueError:
+        session_id = None
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    from loadguard.confine import confine
+    status = confine(session_id if isinstance(session_id, str) else None)
+    if argv[1:2] == ["--status"]:
+        print(status)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except BaseException:  # noqa: BLE001 — never fail a session start
+        pass
+    sys.exit(0)

@@ -5,6 +5,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-confine",
+            "async": true,
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-build",
             "args": ["${CLAUDE_PLUGIN_DATA}"],
             "async": true,

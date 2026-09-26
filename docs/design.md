@@ -71,6 +71,42 @@ Abwägungen, bewusst in Kauf genommen:
 
 Fallback ohne systemd/Delegation (macOS, Container): Stufe 1 aus, fail-open.
 
+Umgesetzt (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
+
+- **Eigener async SessionStart-Hook**, Python. Einmal pro Session ist ein
+  Subprozess billig: `busctl --user call … StartTransientUnit` (kommt mit systemd;
+  kein nachgebautes D-Bus-Protokoll). Live: Call 10 ms, Umzug nach ~30 ms
+  bestätigt (`/proc/<pid>/cgroup`, max. 1 s gepollt). Async genügt: Prozesse, die
+  claude vor dem Attach gestartet hat (MCP-Server, ein früher Befehl), werden als
+  Nachkommen mitverschoben; in beiden Live-Sessions war der Hook vor dem ersten
+  Bash fertig.
+- **Welcher Prozess:** der nächste Vorfahr des Hooks mit `comm` oder `argv[0]`
+  `claude` (höchstens 8 Ebenen), aus `/proc` gelesen.
+- **Eine Regel für Idempotenz und Verschachtelung:** Liegt dieser claude schon in
+  irgendeinem `loadguard-*.scope`, passiert nichts. resume/clear/compact sind damit
+  No-ops, und ein `claude -p` aus einer eingesperrten Session bleibt im Scope der
+  Eltern — herausholen hieße, dem Limit zu entkommen.
+- **Name `loadguard-<session_id[:8]>-<pid>.scope`** in **`app-loadguard.slice`**:
+  `app.slice` ist der Ort für Anwendungen im User-Manager; die eigene Slice gibt
+  Stufe 2/3 einen Knoten für ein gemeinsames Limit aller Sessions. Die PID macht
+  den Namen eindeutig, auch wenn zwei Prozesse dieselbe Session fortsetzen.
+- **`OOMPolicy=continue` ist Pflicht:** Default ist `stop` — ein OOM-Kill des
+  Ausreißers würde den ganzen Scope und damit claude beenden. `CollectMode=
+  inactive-or-failed`: der Scope verschwindet mit dem letzten Prozess.
+- **Limits** in % von MemTotal, per Env: `LOADGUARD_MEMORY_HIGH` 30,
+  `LOADGUARD_MEMORY_MAX` 40, `LOADGUARD_MEMORY_SWAP_MAX` 10, `LOADGUARD_CPU_WEIGHT`
+  50 (systemd-Default 100). Auf reuben: High 2,3 GiB, Max 3,1 GiB, Swap 0,8 GiB.
+  Der 3,8-GB-Perl-Einzeiler (20260917-175030) passt samt claude nicht hinein
+  (Max + Swap < 3,8 GB + 0,3 GB) und wird im Scope OOM-gekillt; ab 2,3 GiB wird
+  die Session gebremst, ein normaler Build bleibt darunter. `IOWeight` fehlt: `io`
+  ist nicht delegiert.
+- **Delegation** einmal pro Boot: `memory` in `user@UID.service/cgroup.controllers`,
+  gecacht als `<boot_id> yes|no` in `$XDG_RUNTIME_DIR/loadguard/delegation`.
+- **Bekannt:** cgroup v2 zieht Speicherladungen beim Umzug nicht mit — was claude
+  vor dem Attach allokiert hat, bleibt der logind-Scope angerechnet. Ohne Linger
+  endet `user@UID.service` mit der letzten Login-Session und nimmt die Scopes mit
+  (reuben: `Linger=yes`).
+
 ### Stufe 2 — Global begrenzen (schwere Befehle)
 
 Über **alle** Claude-Sessions des Users hinweg laufen höchstens N schwere Befehle

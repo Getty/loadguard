@@ -76,6 +76,13 @@ permission rules and loses `cd`. Verified on reuben: memory controller delegated
 (`/sys/fs/cgroup/user.slice/user-$UID.slice/user@$UID.service/cgroup.controllers`),
 cache the answer under `$XDG_RUNTIME_DIR/loadguard/`.
 
+Implemented in `lib/loadguard/confine.py` (k3): scope
+`app-loadguard.slice/loadguard-<session8>-<pid>.scope`, via `busctl` once per session.
+`OOMPolicy=continue` is mandatory — the default `stop` kills claude along with the
+outlier. Already in any `loadguard-*.scope` → do nothing (resume/compact, and a nested
+`claude -p` must not escape its parent's limit). A single vanished PID fails the whole
+`StartTransientUnit`, so retry with claude's PID alone.
+
 ## Testing
 
 Unit-test the decision function on recorded snapshots: turn files from

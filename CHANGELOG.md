@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- SessionStart now confines each session: a new hook (`hooks/loadguard-confine`,
+  `lib/loadguard/confine.py`) moves the claude process into its own systemd
+  user scope (`app-loadguard.slice/loadguard-<session>-<pid>.scope`) via
+  `busctl StartTransientUnit`, with `MemoryHigh`/`MemoryMax`/`MemorySwapMax` at
+  30/40/10% of `MemTotal` and `CPUWeight` 50 — tunable through
+  `LOADGUARD_MEMORY_HIGH`, `LOADGUARD_MEMORY_MAX`, `LOADGUARD_MEMORY_SWAP_MAX`
+  and `LOADGUARD_CPU_WEIGHT`. `OOMPolicy=continue` keeps a kernel OOM kill of
+  the outlier from ending the scope, and with it claude. Commands are never
+  rewritten. A session already inside a `loadguard-*.scope` (resume/compact, a
+  nested `claude -p`) is left alone; without systemd, cgroup v2 memory
+  delegation or a user bus the session runs unconfined. Covered by 43 tests
+  against a fixture `busctl` and one live scope around a real `sleep`.
 - Repo scaffold: design, agent team, karr board.
 - PreToolUse hook on Bash is now a compiled C binary
   (`src/loadguard-hook.c`, vendored cJSON v1.7.19 in `vendor/cJSON/`) instead

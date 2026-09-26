@@ -178,17 +178,27 @@ class PluginWiring(unittest.TestCase):
         self.assertLessEqual(hook["timeout"], 5)
         self.assertGreater(hook["timeout"], BUDGET_S)
 
-    def test_session_start_builds_in_the_background(self):
+    def session_start_hook(self, name):
         (entry,) = self.hooks["SessionStart"]
         self.assertNotIn("matcher", entry)
-        (hook,) = entry["hooks"]
-        self.assertEqual(hook["command"],
-                         "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-build")
+        found = [h for h in entry["hooks"]
+                 if h["command"] == "${CLAUDE_PLUGIN_ROOT}/hooks/" + name]
+        self.assertEqual(len(found), 1, name)
+        self.assertEqual(len(entry["hooks"]), 2)
+        self.assertTrue(os.access(os.path.join(ROOT, "hooks", name), os.X_OK))
+        return found[0]
+
+    def test_session_start_builds_in_the_background(self):
+        hook = self.session_start_hook("loadguard-build")
         self.assertEqual(hook["args"], ["${CLAUDE_PLUGIN_DATA}"])
         self.assertIs(hook["async"], True)
-        self.assertTrue(os.access(os.path.join(ROOT, "hooks", "loadguard-build"),
-                                  os.X_OK))
 
+    def test_session_start_confines_in_the_background(self):
+        # Async: the move takes ~40 ms plus Python start; the session never
+        # waits for it. Processes claude started before it are moved along.
+        hook = self.session_start_hook("loadguard-confine")
+        self.assertIs(hook["async"], True)
+        self.assertLessEqual(hook["timeout"], 10)
 
 if __name__ == "__main__":
     unittest.main()
