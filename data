@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-26T01:15:08Z
+claimed_by: loadguard-release-manager
+class: standard
+completed: 2026-09-26T01:15:08Z
+created: 2026-09-26T00:19:32Z
+depends_on:
+- 7
+id: 8
+priority: high
+started: 2026-09-26T01:15:08Z
+status: done
+tags:
+- hook
+- build
+title: 'Hook-Binary in C: vendored cJSON, Build beim ersten Lauf, fail-open ohne Binary'
+updated: 2026-09-26T01:15:08Z
+---
+
+Entscheidung Getty 2026-09-26, siehe docs/design.md → Sprache und Build. Python-Hook kostet auf reuben 183 ms median. Umfang: vendor/cJSON.{c,h} (offizielle Upstream-Version, Lizenz mitnehmen, Version notieren); C-Hook mit gleichem Verhalten wie der Python-Pass-through (keine Ausgabe, exit 0 bei jedem Fehler); Build beim ersten Lauf auf dem Zielhost — Build darf nie einen Bash-Aufruf blockieren (Vorschlag: SessionStart-Hook baut, falls Binary fehlt/veraltet; PreToolUse-Einstieg ist ein minimaler Starter: Binary da → exec, sonst exit 0). Build-Ort gegen Doku prüfen (${CLAUDE_PLUGIN_ROOT} kann bei Plugin-Updates ersetzt werden — gibt es ${CLAUDE_PLUGIN_DATA}?). gcc-Flags konservativ (-O2, -Wall -Wextra -Werror in Tests). Tests (Python unittest): Binary gegen alle t/fixtures/*.json, Laufzeit messen und berichten, Verhalten ohne Compiler/ohne Binary. Messung (/proc) im C-Pfad erst mit k3/k4, nicht hier.
+
+2026-09-26 00:40 Umgesetzt: vendor/cJSON v1.7.19 (unverändert, SHA256 in README), src/loadguard-hook.c (Pass-through, UTF-8-Prüfung, 8-MiB-Limit, updated_input() über -DLOADGUARD_TEST-Treiber getestet), lib/loadguard/build.py + hooks/loadguard-build (SessionStart async, abgelöstes Kind, flock, temp+rename, Stempel-Hash), hooks/loadguard jetzt sh-Starter in Exec-Form mit args [${CLAUDE_PLUGIN_DATA}], Python-Hook gelöscht, Makefile. 65 Tests grün. Binary median 3.3-3.9 ms, p90 5.9-9.3 ms (Load 7-10).
+
+2026-09-26 00:40 Für k3 / offen: (1) cJSON kürzt Strings bei \u0000 — k3 muss Befehle mit \u0000 durchlassen statt umschreiben. (2) Payload > 8 MiB wird nicht geparst (Pass-through), also auch nicht eingesperrt. (3) Exec-Form (args) und CLAUDE_PLUGIN_DATA bei --plugin-dir (@inline) nur laut Doku, nicht live verifiziert. (4) Zwei installierte Versionen teilen sich CLAUDE_PLUGIN_DATA -> Rebuild-Pingpong bei jedem Sessionstart. (5) CLAUDE.md-Layouttabelle sollte src/, vendor/cJSON/, hooks/loadguard-build, Makefile nennen (nicht angefasst).
+
+2026-09-26 00:40 Grundgerüst C-Hook + Build beim ersten Lauf fertig, Tests grün, nicht committet
+
+2026-09-26 01:15 Committed: 651200f9 (vendor cJSON 1.7.19, unmodified, SHA256 verified against vendor/cJSON/README) and cc7a8859 (C hook + SessionStart build, CHANGELOG entry rewritten). 65 tests green under nice -n 10 (8.2s, python3 -m unittest discover -s t -v). Not pushed, not tagged.
