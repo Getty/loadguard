@@ -114,8 +114,12 @@ Umgesetzt (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
 ### Stufe 2 — Global begrenzen (schwere Befehle)
 
 Über **alle** Claude-Sessions des Users hinweg laufen höchstens N schwere Befehle
-gleichzeitig (Default: `max(1, nproc/2)`). Slots als `flock`-Dateien unter
-`$XDG_RUNTIME_DIR/loadguard/`. Schwer = Muster (`prove`, `dzil test|build|release`,
+gleichzeitig (Default: `max(1, nproc/2)`). **Gezählt per `/proc`-Scan** (entschieden
+2026-09-26): Der PreToolUse-Hook zählt laufende schwere Prozesse unter
+`app-loadguard.slice`. `flock`-Slots gehen nicht, weil der Hook endet, bevor der Befehl
+startet, und Befehle nicht umgeschrieben werden (k3). Keine Locks, nichts bleibt
+hängen; akzeptiertes Rennen: zwei Sessions, die im selben Moment starten, sehen beide
+einen freien Slot. Schwer = Muster (`prove`, `dzil test|build|release`,
 `make test`, `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
 `perlbench`, `claude --bg`, `claude -p`) **plus** alles, was nachträglich im
 Scope viel Speicher gezogen hat (Lernliste, später).
