@@ -1,0 +1,1 @@
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"command": "echo LOADGUARD_PROBE_D"}, "permissionDecision": "allow", "permissionDecisionReason": "loadguard k7 probe"}}

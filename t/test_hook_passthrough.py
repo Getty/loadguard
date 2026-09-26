@@ -109,7 +109,7 @@ class PayloadFields(unittest.TestCase):
 
     def test_bash_command_extracted(self):
         self.assertEqual(self.hook.bash_command(self.payload("bash-plain.json")),
-                         "git status")
+                         "pwd")
         heredoc = self.hook.bash_command(self.payload("bash-heredoc.json"))
         self.assertIn("<<'EOF'\n", heredoc)
         self.assertIn('"double"', heredoc)
@@ -123,9 +123,19 @@ class PayloadFields(unittest.TestCase):
                 self.assertEqual(p["tool_name"], "Bash")
                 for key in ("session_id", "cwd", "tool_use_id"):
                     self.assertIsInstance(p[key], str)
-                self.assertIsInstance(p["tool_input"]["run_in_background"], bool)
+                self.assertIsInstance(
+                    p["tool_input"].get("run_in_background", False), bool)
         self.assertTrue(
             self.payload("bash-background.json")["tool_input"]["run_in_background"])
+
+    def test_recorded_tool_input_holds_only_what_the_model_set(self):
+        # Recorded (k7): no defaults are filled in — description, timeout and
+        # run_in_background are present only if the model passed them.
+        self.assertEqual(self.payload("bash-plain.json")["tool_input"],
+                         {"command": "pwd"})
+        self.assertEqual(self.payload("bash-background.json")["tool_input"],
+                         {"command": "echo LOADGUARD_BG",
+                          "run_in_background": True})
 
     def test_non_bash_and_malformed_yield_none(self):
         self.assertIsNone(self.hook.bash_command(self.payload("read-tool.json")))

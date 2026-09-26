@@ -1,16 +1,1 @@
-{
-  "session_id": "0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55",
-  "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
-  "transcript_path": "/home/getty/.claude/projects/-home-getty-dev-loadguard/0b9d6f1e-4c2a-4a57-9e0f-3f2d8c1a7b55.jsonl",
-  "cwd": "/home/getty/dev/loadguard",
-  "permission_mode": "default",
-  "hook_event_name": "PreToolUse",
-  "tool_name": "Bash",
-  "tool_input": {
-    "command": "cat > /tmp/x.txt <<'EOF'\nline with 'single' and \"double\" quotes\n$HOME stays literal\nEOF\ncd /tmp && wc -l x.txt && (echo sub; exit 0)",
-    "description": "Write a file via heredoc",
-    "timeout": 120000,
-    "run_in_background": false
-  },
-  "tool_use_id": "toolu_01BASHHEREDOC"
-}
+{"session_id":"5181ef18-e570-4eb7-9469-cd109a82b317","transcript_path":"/home/getty/.claude/projects/-tmp-claude-1000--home-getty-dev-loadguard-091fbf8e-fba9-4db6-9742-c3a092c6da8a-scratchpad-k7-session/5181ef18-e570-4eb7-9469-cd109a82b317.jsonl","cwd":"/tmp/claude-1000/-home-getty-dev-loadguard/091fbf8e-fba9-4db6-9742-c3a092c6da8a/scratchpad/k7-session","prompt_id":"1da360d0-aead-4f39-8530-2853ea048c17","permission_mode":"default","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat <<'EOF'\nline with 'single' and \"double\" quotes\n$HOME stays literal\nEOF"},"tool_use_id":"toolu_01JXxuNzb5cyniDZ3bjEqRmE"}

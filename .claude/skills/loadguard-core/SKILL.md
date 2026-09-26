@@ -18,7 +18,11 @@ wrong.
 - Output on stdout, exit 0:
   `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision":
   "allow"|"deny"|"ask", "permissionDecisionReason": "…", "updatedInput": {…}}}`.
-  `updatedInput` replaces the tool input — send the **whole** input back, not a diff.
+  `updatedInput` **replaces** `tool_input`, no merge (recorded k7, Claude Code
+  2.1.283, `t/test_updated_input.py`): a key left out is gone. Copy every key of
+  the incoming `tool_input` — only those the model set are there — and change
+  `command`. It takes effect without `permissionDecision`; the rewritten command
+  ran although only the original matched `--allowedTools`.
 - The deny reason is shown to the model. It is loadguard's only voice: short,
   numbers, one concrete alternative.
 - Field names drift between Claude Code versions. Before relying on one, confirm it
@@ -42,6 +46,8 @@ wrong.
 4. **The wrap is transparent.** Exit code, stdout/stderr, working directory, env and
    `run_in_background` behave as without loadguard. Quoting of the original command
    is the dangerous part — test heredocs, quotes, `&&` chains, `cd`, subshells.
+   The user's permission rules are checked against the *original* command (k7), so
+   a rewrite is never re-vetted: loadguard may only wrap, never change what runs.
 5. **Zero context cost when calm.** No SessionStart/UserPromptSubmit output unless
    pressure is elevated.
 
@@ -57,7 +63,7 @@ wrong.
 `cpu some` is routinely high on reuben and is not an emergency on its own. Memory
 `full avg10` (primary) and total swap fill (secondary) precede the thrash reboots;
 zram fill alone does not — zram0 sits at ~98 % when calm (the swapfile takes the
-overflow). `updatedInput` semantics (replace vs. merge) are unverified until k7 pins them.
+overflow).
 
 ## Confinement
 

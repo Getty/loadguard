@@ -27,6 +27,17 @@ und darf ihn (a) durchlassen, (b) umschreiben (`updatedInput`) oder (c) verweige
 (`permissionDecision: deny` + Grund — dieser Grund landet bei der KI und ist der
 Kanal, über den sie gegensteuert).
 
+**`updatedInput` ersetzt `tool_input` vollständig** (festgenagelt 2026-09-26, k7,
+Claude Code 2.1.283, `t/fixtures/updated-input/`): Felder, die der Hook weglässt
+(`description`, `timeout`), fehlen danach im ausgeführten `tool_input`. Der Hook muss
+also das eingehende `tool_input` komplett kopieren und nur `command` tauschen. Das
+eingehende `tool_input` enthält nur, was die KI gesetzt hat — keine Defaults.
+`updatedInput` wirkt ohne `permissionDecision`; loadguard sendet beim Umschreiben kein
+`allow`. Der umgeschriebene Befehl lief, obwohl nur der Originalbefehl per
+`--allowedTools` freigegeben war — Freigaben wurden am Originalbefehl geprüft (oder
+nach dem Umschreiben nicht erneut); die Umverpackung in `systemd-run` sollte User-
+Freigaben also nicht brechen. Ungetestet: ein nicht freigegebenes Original.
+
 ### Stufe 1 — Einsperren (immer)
 
 Jeder Bash-Befehl wird in einen transienten systemd-User-Scope gewickelt:

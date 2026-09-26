@@ -1,22 +1,44 @@
 # Hook payload fixtures
 
-**All payloads here are reconstructed, not recorded.** They follow the PreToolUse
-input schema at https://code.claude.com/docs/en/hooks as read on 2026-09-26. No
-Claude Code session was instrumented to capture them; replace them with recorded
-payloads once a capture path exists that does not touch the live `~/.claude`.
+**Recorded** payloads are verbatim stdin of the hook, captured 2026-09-26 (k7) in
+one isolated session with Claude Code 2.1.283:
+`claude -p … --plugin-dir ~/dev/loadguard --model haiku` with a temporary
+recorder in `hooks/loadguard` (reverted), cwd in a scratch directory. `session_id`,
+`transcript_path` and `cwd` point at that throwaway session (no transcript was
+kept). The payloads carry no prompt content.
 
-| File | Case |
-|---|---|
-| `bash-plain.json` | light Bash command |
-| `bash-heredoc.json` | heredoc, mixed quotes, `$HOME`, `cd`, `&&`, subshell |
-| `bash-background.json` | `run_in_background: true` |
-| `bash-subagent.json` | fired inside a subagent (`agent_id`, `agent_type`) |
-| `bash-no-command.json` | Bash payload without `tool_input.command` |
-| `read-tool.json` | non-Bash tool |
-| `broken.json` | truncated JSON |
-| `empty.json` | empty stdin |
-| `not-an-object.json` | valid JSON, not an object |
-| `invalid-utf8.json` | bytes that are not UTF-8 |
+Recorded `tool_input` holds **only the keys the model passed** — no defaulted
+`description`, `timeout` or `run_in_background: false`.
+
+**Reconstructed** payloads follow the PreToolUse schema at
+https://code.claude.com/docs/en/hooks as read on 2026-09-26; they have no recorded
+counterpart yet. Their `tool_input` shows keys a real payload may lack.
+
+| File | Origin | Case |
+|---|---|---|
+| `bash-plain.json` | **recorded** | light Bash command (`pwd`) |
+| `bash-heredoc.json` | **recorded** | quoted heredoc with `'single'`, `"double"`, literal `$HOME` |
+| `bash-background.json` | **recorded** | `run_in_background: true` |
+| `bash-subagent.json` | reconstructed | fired inside a subagent (`agent_id`, `agent_type`) |
+| `bash-no-command.json` | reconstructed | Bash payload without `tool_input.command` |
+| `read-tool.json` | reconstructed | non-Bash tool |
+| `broken.json` | synthetic | truncated JSON |
+| `empty.json` | synthetic | empty stdin |
+| `not-an-object.json` | synthetic | valid JSON, not an object |
+| `invalid-utf8.json` | synthetic | bytes that are not UTF-8 |
+
+## `updated-input/` — recorded, pins `updatedInput` semantics
+
+Same session. Per probe: `.pre.json` (PreToolUse payload), `.hook-out.json` (what
+the recorder printed), `.post.json` (PostToolUse payload, same `tool_use_id`).
+The model sent `description` and `timeout`; `updatedInput` carried only `command`.
+
+| Probe | Hook output | Result |
+|---|---|---|
+| `probe-a` | `updatedInput` `echo LOADGUARD_PROBE_A` → `…_B`, **no** `permissionDecision` | `…_B` ran; PostToolUse `tool_input` = `{"command": "echo LOADGUARD_PROBE_B"}` |
+| `probe-c` | `updatedInput` `…_C` → `…_D`, `permissionDecision: allow` | `…_D` ran; `tool_input` = `{"command": "echo LOADGUARD_PROBE_D"}` |
+
+Asserted by `t/test_updated_input.py`.
 
 # Measurement fixtures
 
