@@ -9,7 +9,7 @@ gegensteuern kann. Ziel-Host zuerst: `reuben` (4 Cores, ~8 GB RAM; Swap = 3,2 GB
 `~/load-incidents/*.txt` (54 Snapshots von `~/bin/load-watchdog.sh`, ausgelöst ab
 loadavg ≥ 20). Muster vor den Power-Knopf-Reboots:
 
-- RAM voll, **Swap (zram + Swapfile) 100 % voll**, Memory-/IO-PSI `full` > 50 %, Load bis 45.
+- RAM voll, **Swap (zram + Swapfile) 100 % voll**, Memory-/IO-PSI `full` > 50 %, Load bis 85.
 - 5–7 parallele `claude`-Sessions, jede im D-State (`folio_wait_bit_common`).
 - **Ein einzelner Befehl frisst alles**: `20260917-175030.txt` zeigt ein
   `perl -Ilib -MJSON::Schema::Modern -e …` mit **3,8 GB RSS (48 % RAM)** — ein
