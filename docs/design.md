@@ -33,34 +33,43 @@ Claude Code 2.1.283, `t/fixtures/updated-input/`): Felder, die der Hook wegläss
 also das eingehende `tool_input` komplett kopieren und nur `command` tauschen. Das
 eingehende `tool_input` enthält nur, was die KI gesetzt hat — keine Defaults.
 `updatedInput` wirkt ohne `permissionDecision`; loadguard sendet beim Umschreiben kein
-`allow`. Der umgeschriebene Befehl lief, obwohl nur der Originalbefehl per
-`--allowedTools` freigegeben war — Freigaben wurden am Originalbefehl geprüft (oder
-nach dem Umschreiben nicht erneut); die Umverpackung in `systemd-run` sollte User-
-Freigaben also nicht brechen. Ungetestet: ein nicht freigegebenes Original.
+`allow`.
 
-### Stufe 1 — Einsperren (immer)
+**Freigaben werden am umgeschriebenen Befehl geprüft** (k3, live, korrigiert den
+k7-Schluss): Mit nur dem Original in `--allowedTools` wurde der eingewickelte Befehl
+verweigert, mit nur den eingewickelten Strings lief alles. k7 sah das Gegenteil nur,
+weil der Rewrite dort `echo …` war, das Claude Code als read-only ohnehin freigibt.
+Ein Rewrite bricht also die Freigaben des Users — Stufe 1 per `updatedInput` ist in
+dieser Form nicht tragfähig (Optionen: Karte k3).
 
-Jeder Bash-Befehl wird in einen transienten systemd-User-Scope gewickelt:
+### Stufe 1 — Einsperren: die ganze Session (entschieden 2026-09-26)
 
-```sh
-systemd-run --user --scope -q \
-  -p MemoryHigh=<hi> -p MemoryMax=<max> -p MemorySwapMax=<swap> \
-  -p CPUWeight=<w> -p IOWeight=<w> -- sh -c '<original>'
-```
+Ursprünglich geplant war, jeden Befehl per `updatedInput` in
+`systemd-run --user --scope … -- bash -c '<original>'` zu wickeln. k3 hat live gezeigt,
+dass das nicht tragfähig ist: Freigaben werden am umgeschriebenen Befehl geprüft
+(jede `Bash(git:*)`-Regel bricht), und Claude Code führt jeden Aufruf als
+`bash -c 'source <snapshot> && eval <cmd> && pwd -P >| <cwd-datei>'` aus — eine
+Kind-Shell im Scope verliert `cd` und die Snapshot-Funktionen.
+
+Stattdessen: **Der SessionStart-Hook schiebt den `claude`-Prozess selbst in einen
+transienten systemd-User-Scope mit Limits** (D-Bus `StartTransientUnit` mit `PIDs=`).
+Alles, was die Session startet — Bash-Befehle, Subagenten, MCP-Server — erbt den
+Scope. Befehle werden nie umgeschrieben: Freigaben, `cd`, Funktionen, Exit-Codes und
+`run_in_background` bleiben unberührt; pro Bash-Aufruf kostet Stufe 1 nichts.
 
 Auf reuben verifiziert: Memory-Controller ist an `user@1000.service` delegiert
-(`cpu memory pids`), `memory.max` greift. Wirkung: Ein ausufernder Befehl wird
-gebremst (`MemoryHigh`) bzw. vom Kernel im eigenen Scope gekillt (`MemoryMax`),
-statt zram zu fluten und die Kiste zu thrashen. Die KI sieht dann einen Exit
-137/OOM — und einen Hinweis von loadguard, was passiert ist (PostToolUse).
+(`cpu memory pids`, nicht `io`), `memory.max` greift (OOM im Scope → rc 137), eine
+fremde PID lässt sich aus der logind-`session-N.scope` in einen eigenen Scope
+verschieben (asynchron, ~1–21 ms).
 
-Offene Fragen, vor dem Bauen zu klären:
-- Quoting: den Originalbefehl robust in `sh -c` übergeben (keine Shell-Injection
-  durch die Umverpackung, Heredocs, `cd`-Semantik der Bash-Tool-Session erhalten).
-- Verträgt sich der Scope mit `run_in_background` und mit der persistenten
-  Arbeitsverzeichnis-Semantik des Bash-Tools?
-- Fallback ohne systemd/cgroup-Delegation (macOS, Container): `nice`/`ionice` +
-  `ulimit -v`, oder Stufe 1 aus.
+Abwägungen, bewusst in Kauf genommen:
+- Das Limit gilt pro Session, nicht pro Befehl; `claude` selbst (~300 MB) zählt mit.
+- Bei `MemoryMax` wählt der Kernel im Scope den größten Prozess — in der Regel den
+  Ausreißer, nicht `claude`.
+- `claude` verlässt die logind-Session-Scope.
+- Global über alle Sessions begrenzt erst Stufe 2/3.
+
+Fallback ohne systemd/Delegation (macOS, Container): Stufe 1 aus, fail-open.
 
 ### Stufe 2 — Global begrenzen (schwere Befehle)
 
@@ -112,8 +121,8 @@ den Kontext. Im Normalzustand kostet loadguard **null** Kontext-Tokens.
 
 - Kein Ersatz für `earlyoom` (läuft auf reuben) — loadguard verhindert, dass es so
   weit kommt; earlyoom bleibt die letzte Leitplanke.
-- Keine Kontrolle über Prozesse, die nicht durch das Bash-Tool gehen (podman-Runs
-  anderer Tools, MCP-Server). perlbench-Container brauchen eigene `--memory`-Limits
+- Keine Kontrolle über Prozesse außerhalb von Claude-Code-Sessions (podman-Runs
+  anderer Tools). perlbench-Container brauchen eigene `--memory`-Limits
   — separates Ticket, kein Hook-Thema.
 - Kein Telemetrie-Versand. Alles lokal.
 
