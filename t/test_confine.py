@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
@@ -23,6 +24,8 @@ ENTRY = os.path.join(ROOT, "hooks", "loadguard-confine")
 from loadguard import confine  # noqa: E402
 
 UID = 1000
+USER = "getty"
+LINGER = "/var/lib/systemd/linger/" + USER
 BOOT = "4a6b8362-ed02-4d0f-9a3d-c85c6bd2bb49"
 SESSION = "091fbf8e-fba9-4db6-9742-c3a092c6da8a"
 LOGIND = "/user.slice/user-1000.slice/session-2.scope"
@@ -65,6 +68,7 @@ class Tree:
         self.write("/proc/sys/kernel/random/boot_id", BOOT + "\n")
         self.write("/proc/meminfo", MEMINFO_8G)
         self.write(confine.controllers_path(UID), "cpu memory pids\n")
+        self.write(LINGER, "")  # as on reuben: `loginctl enable-linger getty`
         self.bus = os.path.join(self.runtime, "bus")
         with open(self.bus, "w"):
             pass  # existence is all confine checks
@@ -115,6 +119,14 @@ class Base(unittest.TestCase):
         saved = dict(os.environ)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
         self.t = Tree(tmp.name)
+        # uid → name without depending on this host's passwd.
+        def getpwuid(uid):
+            if uid != UID:
+                raise KeyError(uid)
+            return mock.Mock(pw_name=USER)
+        patcher = mock.patch.object(confine.pwd, "getpwuid", getpwuid)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def reuben_session(self):
         """sshd → screen → bash → claude → {sh → hook, 2 MCP servers}."""
@@ -395,6 +407,31 @@ class Confine(Base):
         self.assertEqual(self.t.confine(11), "start-failed")
         self.assertEqual(len(self.t.calls()), 1)
 
+    def test_with_linger_as_before(self):
+        claude = self.reuben_session()
+        self.assertTrue(confine.lingering(self.t.root, UID))
+        self.assertEqual(self.t.confine(2549600), "attached")
+        self.assertEqual(len(self.t.calls()), 1)
+        self.assertTrue(confine.in_loadguard_scope(
+            confine.cgroup(self.t.root, claude)))
+
+    def test_only_exact_zero_disables(self):
+        claude = self.reuben_session()
+        for value in ("1", "", "yes", "false", "no", "off", "00", " 0", "0 "):
+            with self.subTest(value=value):
+                self.t.write("/proc/%d/cgroup" % claude, "0::%s\n" % LOGIND)
+                self.assertEqual(self.t.confine(
+                    2549600, env=dict(self.t.env, LOADGUARD_CONFINE=value)),
+                    "attached")
+
+    def test_nested_without_linger_is_still_already(self):
+        # The already-check comes first: a confined parent explains itself.
+        outer = self.reuben_session()
+        scope = SLICE_PATH + "/loadguard-091fbf8e-%d.scope" % outer
+        self.t.write("/proc/%d/cgroup" % outer, "0::%s\n" % scope)
+        os.remove(self.t.root + LINGER)
+        self.assertEqual(self.t.confine(2549600), "already")
+
     def test_unconfirmed_move(self):
         self.reuben_session()
         os.environ["FAKE_NOMOVE"] = "1"
@@ -450,6 +487,39 @@ class FailOpen(Base):
         self.reuben_session()
         os.remove(self.t.root + confine.controllers_path(UID))
         self.assert_skips("no-delegation")
+
+    def test_disabled(self):
+        self.reuben_session()
+        self.assert_skips("disabled",
+                          env=dict(self.t.env, LOADGUARD_CONFINE="0"))
+
+    def test_disabled_is_checked_first(self):
+        # Not even /proc is read: no claude, no tree at all.
+        shutil.rmtree(self.t.root)
+        self.assert_skips("disabled", start=51,
+                          env=dict(self.t.env, LOADGUARD_CONFINE="0"))
+
+    def test_no_linger(self):
+        self.reuben_session()
+        os.remove(self.t.root + LINGER)
+        self.assert_skips("no-linger")
+
+    def test_linger_of_another_user_only(self):
+        self.reuben_session()
+        os.remove(self.t.root + LINGER)
+        self.t.write("/var/lib/systemd/linger/root", "")
+        self.assert_skips("no-linger")
+
+    def test_no_linger_dir(self):
+        self.reuben_session()
+        shutil.rmtree(self.t.root + "/var")
+        self.assert_skips("no-linger")
+
+    def test_uid_without_passwd_entry(self):
+        self.reuben_session()
+        with mock.patch.object(confine.pwd, "getpwuid",
+                               side_effect=KeyError(UID)):
+            self.assert_skips("no-linger")
 
     def test_no_meminfo(self):
         self.reuben_session()

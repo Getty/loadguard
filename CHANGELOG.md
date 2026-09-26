@@ -12,8 +12,12 @@
   the outlier from ending the scope, and with it claude. Commands are never
   rewritten. A session already inside a `loadguard-*.scope` (resume/compact, a
   nested `claude -p`) is left alone; without systemd, cgroup v2 memory
-  delegation or a user bus the session runs unconfined. Covered by 43 tests
-  against a fixture `busctl` and one live scope around a real `sleep`.
+  delegation, a user bus, or **linger** (`/var/lib/systemd/linger/$USER`) the
+  session runs unconfined — without linger the user manager, and with it the
+  scope, would not outlive a `claude` left running in `screen`/`tmux` past the
+  last logout. `LOADGUARD_CONFINE=0` (only that exact value) turns confinement
+  off outright. Covered by 52 tests against a fixture `busctl` and one live
+  scope around a real `sleep`.
 - Repo scaffold: design, agent team, karr board.
 - PreToolUse hook on Bash is now a compiled C binary
   (`src/loadguard-hook.c`, vendored cJSON v1.7.19 in `vendor/cJSON/`) instead

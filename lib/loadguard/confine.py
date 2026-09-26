@@ -17,6 +17,11 @@ Rules:
   on resume/clear/compact a no-op and keeps a `claude -p` started from a
   confined session inside its parent's scope; moving it out would let it
   escape the limit.
+- No linger for the user: nothing happens. Without linger the user manager,
+  and with it the scope, stops at the last logout, taking along a claude
+  that was meant to outlive it in screen/tmux.
+- LOADGUARD_CONFINE=0: nothing happens. Only the exact value "0" is off;
+  anything else, typos included, keeps the protective default.
 - Everything that is not clearly fine (no cgroup v2, no memory controller
   delegated to user@UID.service, no bus socket, no busctl, any error) leaves
   the session where it is.
@@ -26,6 +31,7 @@ is "" in production.
 """
 
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -109,6 +115,17 @@ def delegated(root, runtime_dir, uid):
     except OSError:
         pass
     return yes
+
+
+def lingering(root, uid):
+    """Has logind a linger file for uid's user? /var/lib/systemd/linger/<name>
+    is what `loginctl enable-linger` creates and logind tests for existence.
+    """
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return False
+    return os.path.exists(root + "/var/lib/systemd/linger/" + name)
 
 
 def ppid(root, pid):
@@ -229,6 +246,8 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
     uid = os.getuid() if uid is None else uid
     start = os.getppid() if start is None else start
     me = os.getpid() if me is None else me
+    if environ.get("LOADGUARD_CONFINE") == "0":
+        return "disabled"
 
     pid, chain = find_claude(root, start)
     if pid is None:
@@ -238,6 +257,8 @@ def confine(session_id, start=None, root="", environ=None, uid=None,
         return "no-cgroup-v2"
     if in_loadguard_scope(path):
         return "already"
+    if not lingering(root, uid):
+        return "no-linger"
     runtime_dir = environ.get("XDG_RUNTIME_DIR", "")
     if not runtime_dir.startswith("/") or \
             not os.path.exists(os.path.join(runtime_dir, "bus")):

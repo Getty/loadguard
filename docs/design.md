@@ -70,6 +70,10 @@ Abwägungen, bewusst in Kauf genommen:
 - Global über alle Sessions begrenzt erst Stufe 2/3.
 
 Fallback ohne systemd/Delegation (macOS, Container): Stufe 1 aus, fail-open.
+Ebenso ohne Linger (`/var/lib/systemd/linger/$USER`): sonst stürbe ein `claude` in
+`screen`/`tmux` beim letzten Logout mit dem User-Manager. Ausschalter:
+`LOADGUARD_CONFINE=0`. Verschachtelte `claude -p` bleiben bewusst im Scope der
+Eltern-Session und teilen deren Limit (entschieden 2026-09-26).
 
 Umgesetzt (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
 
