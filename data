@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-09-26T00:28:32Z
+claimed_by: loadguard
+class: standard
+completed: 2026-09-26T00:28:30Z
+created: 2026-09-26T00:19:32Z
+depends_on:
+- 1
+id: 7
+priority: high
+started: 2026-09-26T00:28:30Z
+status: done
+tags:
+- hook
+- verify
+title: updatedInput + echte Payloads in isolierter --plugin-dir-Session festnageln
+updated: 2026-09-26T00:28:32Z
+---
+
+Von Getty freigegeben (2026-09-26): EINE Session 'claude --plugin-dir ~/dev/loadguard -p …' mit temporärem Aufzeichnungs-Hook — ~/.claude bleibt unberührt, nichts installieren. Ziele: (1) echte PreToolUse-Payloads (normal, Heredoc, run_in_background, Subagent falls billig) aufzeichnen und als t/fixtures/*.json ablegen, Nachbauten ersetzen/markieren; (2) festnageln, ob hookSpecificOutput.updatedInput tool_input ERSETZT oder MERGT — mit harmlosem Befehl (z. B. echo A → echo B, und ein Feld weglassen, um zu sehen, ob es verloren geht); (3) Ergebnis als Test/Fixture und in loadguard-core-Skill + design.md vermerken. Aufzeichnungs-Hook nach dem Lauf wieder auf Pass-through zurückbauen. Nur eine claude-Session, kein Loop, harmloser Prompt, Kosten klein halten.
+
+2026-09-26 00:23 Pre-check ok: loadguard not in ~/.claude settings/marketplaces/installed_plugins (only briefing@getty project-scoped for this path), no running --plugin-dir session. Temporary recorder hook (PreToolUse+PostToolUse Bash) logs to /run/user/1000/loadguard-k7/.
+
+2026-09-26 00:26 Result (1 session, haiku, 6 turns, $0.026): updatedInput REPLACES tool_input (description/timeout omitted in updatedInput were missing in PostToolUse tool_input), works without permissionDecision, rewritten cmd ran although only the original was in --allowedTools. Real tool_input carries only model-set keys (no defaults). Fixtures plain/heredoc/background now recorded; t/fixtures/updated-input/ + t/test_updated_input.py pin it. hooks/ restored (git diff empty), temp files removed. Open: unallowed original rewritten to allowed; subagent payload not recorded.
+
+2026-09-26 00:26 Recorded payloads + updatedInput=replace pinned; tests green (36). Commit-ready, not committed.
+
+2026-09-26 00:28 Committed 98af840: recorded k7 payloads + updatedInput=replace pinned (fixtures, t/test_updated_input.py, SKILL.md, design.md); CHANGELOG hook entry rewritten. 36 tests green.
