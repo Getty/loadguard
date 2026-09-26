@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-27
+
 - loadguard learns heavy commands (k15). Each confined session gets a
   watcher — `loadguard-hook --watch PID`, started detached by the
   `SessionStart` confine hook once the session is in its scope, one per
