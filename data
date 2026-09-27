@@ -1,0 +1,34 @@
+---
+claimed_at: 2026-09-27T00:50:54Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-27T00:50:54Z
+created: 2026-09-27T00:22:08Z
+id: 16
+priority: high
+started: 2026-09-27T00:22:20Z
+status: done
+tags:
+- codex
+- docs
+title: 'Codex-Live-Test festhalten: echte Shell-Fixture, Kette, Doku'
+updated: 2026-09-27T00:50:54Z
+---
+
+Live-Test mit Getty 2026-09-27 (codex-cli 0.153.4, loadguard 0.2.0 über getty-dev, LOADGUARD_PSI_FULL=1 LOADGUARD_SWAP_USED=1), Rollout ~/.codex/sessions/2026/09/27/rollout-2026-09-27T02-13-01-01a0e035-*.jsonl:
+- Scope: codex (pid 352696) in loadguard-01a0e035-352696.scope, Description "loadguard: codex session 01a0e035-…" ✓
+- Erster Prompt direkt nach der Installation: keine Lage-Zeile (SessionStart/UserPromptSubmit 02:13:04, Binary erst 02:13:07 gebaut), kein Beobachter in dieser Session (confine lief vor dem Build) — wie dokumentiert. PreToolUse 02:13:09 griff schon.
+- Zweiter Prompt: Lage-Zeile kommt als developer-Nachricht an ✓; git status läuft; make test und codex exec verweigert, Grund mit ". Command: <cmd>" angehängt (".." bestätigt, k14).
+- Codex ruft Befehle hier über code mode auf: exec → tools.exec_command({cmd: …}); der Hook greift trotzdem.
+- Shell-Form live: `sleep 45; echo "lg probe" 'x'` lief als argv [/bin/bash, -c, <cmd>] — argv[2] byte-gleich mit dem cmd des Modells; der Test-Treiber `extract` (harness codex) liefert genau diesen Text. bash blieb (;-Liste), sleep als Kind.
+- Kette im Scope: codex(352696) → codex-linux-sandbox (argv0 /home/getty/.codex/tmp/arg0/codex-arg0XXXX/codex-linux-sandbox, --sandbox-policy-cwd … --command-cwd …) → bwrap (comm "3", argv bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / …) → codex-linux-sandbox (comm codex, argv0 codex-linux-sandbox) → /bin/bash -c <cmd> → sleep 45. Daneben: codex-code-mode-host, agent-irc (python3 -I -c …).
+
+Umfang: (1) t/fixtures/shells/: die echte Codex-argv als aufgezeichneter Fall + Test (extract). (2) t/fixtures/procs/codex-session.json an die beobachtete Kette angleichen (k14 Punkt 5: bash nur bei Mehrfachbefehlen; Einzelbefehl = exec), Slot-Zählung muss gleich bleiben. (3) docs/design.md Codex-Abschnitt: "Offen: Live-Test" → "Live bestätigt (2026-09-27)" mit den Punkten oben; README: Status- und Codex-Abschnitt ("first live run still ahead", "not yet confirmed in a live run") korrigieren; CHANGELOG Unreleased. (4) t/fixtures/README.md. Keine Code-Änderung am Hook erwartet — falls doch nötig: stoppen und melden.
+
+2026-09-27 00:28 Start: Rollout bestätigt den Befehl: custom_tool_call exec → tools.exec_command({cmd:"sleep 45; echo \"lg probe\" 'x'"}); das CommandExecution-Item nennt [/bin/bash, -lc, cmd], der Prozess lief als [/bin/bash, -c, cmd] — das Snapshot-Skript execs -c (Snapshot ~/.codex/shell_snapshots/01a0e035-….sh existiert). Plan: shells/codex.json (ein Fall), codex-session.json mit ;-Liste (bash bleibt, 1 Slot) und bwrap-comm 3, Doku.
+
+2026-09-27 00:36 Auch gefunden (nicht angefasst): (a) src/loadguard-hook.c:714-721, Kommentar über shell_command() sagt noch 'not yet checked against a live Codex payload' — kein Hook-Edit in k16 (Quellen-Hash → Rebuild), passt zu k14, das den Hook ohnehin ändert. (b) .claude/skills/loadguard-core/SKILL.md:187 'Codex: argv[2] (not yet confirmed live)' — veraltet, Skill-Pflege beim Orchestrator. (c) Lücke: ein gelernter Einzelbefehl (unter Claude Code gelernt, dort bleibt die Shell) hält unter Codex beim Laufen keinen Slot — bash execs ihn, keine Shell trägt den Text, und der Scan vergleicht argv nicht mit der Liste; eingehend wird er trotzdem verweigert. design.md Grenzen nennt nur 'nicht gelernt'. (d) .claude/skills/kanban-issues-karr-ticket/SKILL.md war schon vorher geändert und wurde während der Arbeit von außen weiter geändert — nicht Teil von k16.
+
+2026-09-27 00:36 Fertig: (1) t/fixtures/shells/codex.json neu — die live aufgezeichnete Codex-Shell (argv [/bin/bash, -c, cmd], cmd = 'sleep 45; echo "lg probe" '\''x'\''' laut Rollout), Test test_learn.Extract.test_recorded_codex_shell (codex/any → cmd byte-gleich, claude → nichts); recorded() nimmt den Dateinamen. (2) procs/codex-session.json: bash 7203 führt eine ;-Liste aus ('prove -lr t/; echo "exit $?"', auch im Snapshot-Skript der Helfer), bwrap-comm 3 statt 5; test_codex_takes_the_string pinnt die neue argv, Watch.test_codex_session lernt eine ;-Liste. Slot-Zählung unverändert (1; alle Specs 5). (3) design.md: Lernliste argv[2] live bestätigt, Grenzen/Offen umgeschrieben, Codex-Abschnitt 'Live bestätigt (2026-09-27)' mit den Beobachtungen + Marketplace cbdd3af. README: Status, Install (erste Session: keine Lage-Zeile, kein Beobachter), Codex-Abschnitt (live, Installation aus dem Marketplace, erste Session, Lernen). CHANGELOG Unreleased ein Eintrag. t/fixtures/README.md. Kein Hook-Code geändert. Tests: test_learn.py 70 OK, Codex-Tests in test_throttle/test_confine 17 OK, volle Suite (nice) 329 OK, 0 übersprungen — jeweils nach PSI-Check (full avg10 < 10).
+
+2026-09-27 00:50 Committed a4fabeb: Record the Codex live test: real shell fixture, observed chain, docs (k16). CHANGELOG entry tightened to user-facing text before commit. Full suite: 329 OK, 0 skipped (checked /proc/pressure/memory full avg10 < 10 before running).
