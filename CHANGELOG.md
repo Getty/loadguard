@@ -9,6 +9,17 @@
   (`codex plugin add loadguard@getty`); the first session after
   installing gets no pressure line on its first prompt and no watcher
   while the hook builds.
+- `codex review` is heavy like `codex exec` (k14): refused under memory
+  pressure or with every slot busy, holding no slot while it runs; the
+  advice for headless sessions names it.
+- Under Codex the refusal reason no longer ends in `..` once Codex appends
+  `. Command: <cmd>`, and the pressure line no longer points at
+  `loadguard status`, which is not on Codex's PATH (k14). Claude Code's
+  output is unchanged.
+- Two Codex limits are now documented (k14): a lone command isn't learned
+  (bash replaces its own shell before the watcher can read it), and a
+  command learned under Claude Code is refused under Codex but holds no
+  slot while it runs. Claude Code's zsh wrapper is likewise unrecorded.
 
 ## 0.2.0 - 2026-09-27
 

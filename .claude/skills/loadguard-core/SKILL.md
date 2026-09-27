@@ -119,7 +119,7 @@ heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTT
 - Running: judge argv, not text — argv[0] basename, an interpreter's script,
   never inline code (`bash -c`, `perl -e`: that is Claude Code's wrapper). Count
   only the topmost heavy process of a chain in the slice. `claude -p`/`--bg`
-  and `codex exec` are heavy to start but hold no slot.
+  and `codex exec`/`review` are heavy to start but hold no slot.
 - Advice: under memory pressure wait, light commands still run — **never a
   test run**, not even one file, and never a command the classifier lets
   through (`perl t/x.t`): that teaches the way around the guard, and one perl
@@ -133,7 +133,8 @@ heavy ≥ `LOADGUARD_HEAVY_SLOTS` `max(1, nproc/2)`) → deny. `LOADGUARD_THROTT
 plus what is refused and what still runs); else not a byte. Full slots alone
 add no line, and the path never scans `/proc`. No test run suggested (see
 advice). No state across prompts. At most 216 characters
-(`test_line_stays_short`).
+(`test_line_stays_short`). Under Codex without "; see `loadguard status`"
+(k14).
 
 ## Codex (k11)
 
@@ -148,10 +149,18 @@ details and file:line in `docs/design.md` → Codex (k11).
   `$CLAUDE_PLUGIN_DATA` alone (`CodexRuns`). Top level of hooks.json: only
   `description`/`hooks`. Output structs deny unknown fields.
 - Shell tool → PreToolUse `tool_name: "Bash"`, `tool_input: {"command"}` only.
-  Same deny JSON, same context JSON; outputs must equal Claude Code's byte for
-  byte (`CodexPayloads`). Codex wraps a deny as `Command blocked by PreToolUse
-  hook: {reason}. Command: {cmd}`.
-- `codex exec|e` = `K_AGENT` like `claude -p`: heavy to start, no slot. Commands
+  Same deny JSON, same context JSON, same decision. Codex wraps a deny as
+  `Command blocked by PreToolUse hook: {reason}. Command: {cmd}`, so its
+  reason drops the final period; its context line drops "; see `loadguard
+  status`" (k14, `codex_spelling()` in `CodexPayloads`). Claude Code's bytes
+  never change (`test_claude_code_bytes_unchanged`).
+- Harness (`from_codex()`, no file): `turn_id` string in the payload on
+  PreToolUse/UserPromptSubmit (Codex extension, `schema.rs:280-281,
+  569-570`); SessionStart has none (499-510), there `PLUGIN_ROOT` ==
+  `CLAUDE_PLUGIN_ROOT` in the env (`discovery.rs:262-270`). No signal →
+  Claude Code's form. Claude Code already has `turn_id` on MessageDisplay.
+- `codex exec|e|review` = `K_AGENT` like `claude -p`: heavy to start, no slot
+  (`review` is exec in its own process, `cli/src/main.rs:1160-1174`). Commands
   run codex → `codex-linux-sandbox` → bwrap → helper (comm `codex`, argv[0]
   `codex-linux-sandbox`) → `bash -c` → …: helpers are light and hide nothing
   (`procs/codex-session.json`).
@@ -184,8 +193,10 @@ entries. `LOADGUARD_LEARN=0` → no watcher, list ignored.
   wrapper (recorded, `t/fixtures/shells/`): `… && eval '<cmd>'[ < /dev/null]
   && pwd -P >| /tmp/claude-XXXX-cwd`, a quote written `'"'"'`; read the word
   as the shell would, anything else = unknown form, nothing learned. Codex:
-  argv[2] (not yet confirmed live); bash 5.2 execs the last command of
-  `-c`, so a lone Codex command has no shell and is not learned. The watcher picks the form by the
+  argv[2] (confirmed live 2026-09-27, `shells/codex.json`); bash 5.2 execs
+  the last command of `-c`, so a lone Codex command has no shell and is not
+  learned — nor holds a slot as a learned one (documented, not rebuilt from
+  argv). zsh wrapper unrecorded (no zsh on reuben). The watcher picks the form by the
   session process (claude/codex); an MCP server behind `sh -c` is no call.
 - Writes (watcher, `loadguard forget`): `flock` on `learned.lock`, tmp +
   `fsync` + `rename`. Write on crossing `LOADGUARD_LEARN_RSS` (20 % of

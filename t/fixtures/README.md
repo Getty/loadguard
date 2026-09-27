@@ -57,7 +57,13 @@ Getty's hook trust). Values: UUIDv7 ids and a rollout path in the shape of
 
 The hook reads the same fields as in Claude Code's (`hook_event_name`,
 `tool_name`, `tool_input.command`, `session_id` for confine); the tests
-swap the command.
+swap the command. Since k14 also `turn_id`: a string there marks a
+PreToolUse or UserPromptSubmit payload as Codex's, which gets the reason
+without its final period and the context line without the pointer to
+`loadguard status`. `session-start.json` has no `turn_id` (nor has the
+struct); the tests give it the environment Codex gives a plugin's hooks,
+`PLUGIN_ROOT` = `CLAUDE_PLUGIN_ROOT` (`CODEX_ENV` in
+`t/test_throttle.py`).
 
 ## `updated-input/` — recorded, pins `updatedInput` semantics
 

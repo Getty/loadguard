@@ -15,7 +15,7 @@
  * ` or a newline, past VAR=x assignments and prefixes like nice, timeout or
  * env — runs prove, dzil test|build|release, make … test, cpanm,
  * docker|podman build|run, cargo build|test, npm test, perlbench,
- * claude -p|--print|--bg or codex exec|e. Quotes, comments and heredoc
+ * claude -p|--print|--bg or codex exec|e|review. Quotes, comments and heredoc
  * bodies are not commands. Also heavy: a command whose exact text is in the
  * learned list (k15, below). Everything else is light and costs one read
  * beyond stdin — the learned list, a failed open() while there is none.
@@ -31,12 +31,19 @@
  *     running command is one slot: processes are judged by their argv, not
  *     by the text of the Bash wrapper around them, and only the topmost
  *     heavy process of a chain counts (prove's perl children, a recursive
- *     make). claude -p/--bg and codex exec sessions hold no slot; what they
- *     run does. Codex's sandbox helpers (codex-linux-sandbox, bwrap) are
- *     no heavy process and hide none (k11). A shell running a learned
- *     command holds a slot too (k15).
+ *     make). claude -p/--bg and codex exec/review sessions hold no slot;
+ *     what they run does. Codex's sandbox helpers (codex-linux-sandbox,
+ *     bwrap) are no heavy process and hide none (k11). A shell running a
+ *     learned command holds a slot too (k15).
  * LOADGUARD_THROTTLE=0 (only that exact value): pure pass-through, and no
  * context line — nothing is refused, so there is nothing to warn about.
+ *
+ * Codex (k14) gets the same answers in two spellings of its own: the deny
+ * reason without its final period (Codex appends ". Command: <cmd>"), the
+ * context line without the pointer to `loadguard status` (not on Codex's
+ * PATH). from_codex() tells the harness from the payload and, on
+ * SessionStart, the environment — no file. Claude Code's bytes stay as
+ * they were.
  *
  * The learned list (k15, docs/design.md "Lernliste"):
  * ${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl, one JSON object
@@ -238,8 +245,9 @@ enum kind {
     K_PROVE,        /* prove */
     K_SUITE,        /* a whole test suite: make test, dzil test|release, … */
     K_BUILD,        /* builds, installs, containers, perlbench */
-    K_AGENT,        /* claude -p|--print|--bg, codex exec|e: a new headless
-                       agent session, heavy to start, holds no slot */
+    K_AGENT,        /* claude -p|--print|--bg, codex exec|e|review: a new
+                       headless agent session, heavy to start, holds no
+                       slot */
     K_LEARNED       /* the exact text of a command in the learned list (k15) */
 };
 
@@ -257,9 +265,11 @@ static const char *const INTERPRETERS[] = {
  * Arguments that make an agent CLI start a headless session, anywhere after
  * the command word: Codex takes global options before the subcommand
  * (`codex -m o3 exec …`); `e` is exec's alias (`codex --help`, 0.153.4).
+ * `codex review` is exec running a review, in its own process
+ * (codex-rs cli/src/main.rs:1160-1174, rust-v0.153.4); it has no alias.
  */
 static const char *const CLAUDE_HEADLESS[] = {"-p", "--print", "--bg", NULL};
-static const char *const CODEX_HEADLESS[] = {"exec", "e", NULL};
+static const char *const CODEX_HEADLESS[] = {"exec", "e", "review", NULL};
 
 static const char *base(const char *s)
 {
@@ -717,8 +727,8 @@ unknown:
  * form. Claude Code: the eval text of its wrapper. Codex: the string
  * itself — codex-rs runs `<shell> -c|-lc <command>`, with its shell
  * snapshot as a script that execs exactly that (core/src/shell.rs:22-31,
- * tools/runtimes/mod.rs:225-302); not yet checked against a live Codex
- * payload.
+ * tools/runtimes/mod.rs:225-302); confirmed live 2026-09-27, argv[2] the
+ * model's command byte for byte (k16, t/fixtures/shells/codex.json).
  */
 static char *shell_command(char *const *av, int ac, enum harness h)
 {
@@ -1459,7 +1469,8 @@ static void advice(char *r, size_t size, const struct match *m, int slots)
         break;
     case K_AGENT:
         add(r, size, " Do not start new `claude -p`/`claude --bg` or "
-            "`codex exec` sessions now; do the work in this one.");
+            "`codex exec`/`codex review` sessions now; do the work in this "
+            "one.");
         break;
     default:
         break;
@@ -1525,12 +1536,40 @@ static int learned_command(const char *command, struct match *m)
 }
 
 /*
+ * Did Codex send this payload (k14)? Codex adds turn_id to its turn-scoped
+ * hook inputs, PreToolUse and UserPromptSubmit among them (codex-rs
+ * rust-v0.153.4 hooks/src/schema.rs:280-281, 569-570, "Codex extension");
+ * Claude Code's carry none. SessionStart has no turn_id and no field of
+ * Codex's own (schema.rs:499-510), so there the environment tells: Codex
+ * sets PLUGIN_ROOT and CLAUDE_PLUGIN_ROOT to the same path for every hook
+ * of a plugin (hooks/src/engine/discovery.rs:262-270) — and only as a
+ * plugin does loadguard run under Codex — while Claude Code sets
+ * CLAUDE_PLUGIN_ROOT alone. No file is read. A wrong answer costs a period
+ * or a pointer, nothing else.
+ */
+static int from_codex(const cJSON *payload, const char *event)
+{
+    const char *root, *claude_root;
+
+    if (event == NULL || strcmp(event, "SessionStart") != 0)
+        return cJSON_IsString(
+            cJSON_GetObjectItemCaseSensitive(payload, "turn_id"));
+    root = getenv("PLUGIN_ROOT");
+    claude_root = getenv("CLAUDE_PLUGIN_ROOT");
+    return root != NULL && claude_root != NULL &&
+           strcmp(root, claude_root) == 0;
+}
+
+/*
  * The deny reason for a Bash command into reason; 0 if loadguard has no
  * objection. Light commands return having read the learned list only.
+ * For Codex without the final period: it appends ". Command: <cmd>"
+ * (core/src/hook_runtime.rs:229-234), and the model read "still run..".
  */
-static int objection(const char *root, const char *command, struct verdict *v,
-                     char *reason, size_t size)
+static int objection(const char *root, const char *command, int codex,
+                     struct verdict *v, char *reason, size_t size)
 {
+    size_t n;
     int i;
 
     v->m.kind = K_NONE;
@@ -1554,6 +1593,8 @@ static int objection(const char *root, const char *command, struct verdict *v,
     }
     measures(reason, size, root, &v->pr, &v->c);
     advice(reason, size, &v->m, v->scanned);
+    if (codex && (n = strlen(reason)) > 0 && reason[n - 1] == '.')
+        reason[n - 1] = '\0';
     return 1;
 }
 
@@ -1585,10 +1626,13 @@ static const char *context_event(const cJSON *payload)
  * refuses heavy commands. Full slots alone add no line: the host is fine and
  * a slot frees in a moment. No test run is suggested (see advice()). Facts,
  * not orders: the hooks docs warn that text framed as system instructions
- * can trip prompt-injection defenses.
+ * can trip prompt-injection defenses. For Codex without the pointer to
+ * `loadguard status`: Codex puts no plugin bin/ on its shell's PATH
+ * (core/src/tools/runtimes/mod.rs:118-144), and in its sandbox /proc shows
+ * the sandbox alone.
  */
-static int situation(const char *root, struct verdict *v, char *line,
-                     size_t size)
+static int situation(const char *root, int codex, struct verdict *v,
+                     char *line, size_t size)
 {
     v->pressured = v->scanned = 0;
     v->off = throttle_off();
@@ -1599,13 +1643,13 @@ static int situation(const char *root, struct verdict *v, char *line,
     add(line, size, "loadguard: ");
     pressure_figures(line, size, &v->pr, &v->c);
     add(line, size, ". Heavy commands refused until it eases: prove, make "
-        "test, builds, new claude -p/--bg. Light commands still run; see "
-        "`loadguard status`.");
+        "test, builds, new claude -p/--bg. Light commands still run%s.",
+        codex ? "" : "; see `loadguard status`");
     return 1;
 }
 
 /*
- * The longest reason is about 900 bytes (a label of < 64, 3 holders of
+ * The longest reason is about 920 bytes (a label of < 64, 3 holders of
  * < 160, all figures at 100 %, the longest advice), the context line 216 at
  * most: neither ever gets cut, and so never mid-character.
  */
@@ -1649,7 +1693,8 @@ static void hook(const char *root, const cJSON *payload)
     struct verdict v;
 
     if (event != NULL) {
-        if (situation(root, &v, text, sizeof text)) {
+        if (situation(root, from_codex(payload, event), &v, text,
+                      sizeof text)) {
             const char *const kv[] = {
                 "hookEventName", event, "additionalContext", text, NULL
             };
@@ -1661,7 +1706,7 @@ static void hook(const char *root, const cJSON *payload)
     if (input != NULL &&
         objection(root,
                   cJSON_GetObjectItemCaseSensitive(input, "command")->valuestring,
-                  &v, text, sizeof text)) {
+                  from_codex(payload, NULL), &v, text, sizeof text)) {
         const char *const kv[] = {
             "hookEventName", "PreToolUse", "permissionDecision", "deny",
             "permissionDecisionReason", text, NULL
@@ -1808,7 +1853,8 @@ static int report_explain(const char *root, const cJSON *payload)
     } else {
         denied = objection(root, cJSON_GetObjectItemCaseSensitive(
                                input, "command")->valuestring,
-                           &v, reason, sizeof reason);
+                           from_codex(payload, NULL), &v, reason,
+                           sizeof reason);
         out = report_start("explain", v.off);
         cJSON_AddBoolToObject(out, "bash", 1);
         if (v.m.kind == K_NONE)

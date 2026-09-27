@@ -124,7 +124,8 @@ startet, und Befehle nicht umgeschrieben werden (k3). Keine Locks, nichts bleibt
 hängen; akzeptiertes Rennen: zwei Sessions, die im selben Moment starten, sehen beide
 einen freien Slot. Schwer = Muster (`prove`, `dzil test|build|release`,
 `make test`, `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
-`perlbench`, `claude --bg`, `claude -p`, seit k11 `codex exec`) **plus** alles,
+`perlbench`, `claude --bg`, `claude -p`, seit k11 `codex exec`, seit k14
+`codex review`) **plus** alles,
 was nachträglich im Scope viel Speicher gezogen hat (Lernliste, unten).
 
 Kein freier Slot → Stufe 3 statt stillem Warten (die KI soll wissen, dass sie wartet).
@@ -321,6 +322,14 @@ Snapshots zeigt einen Fall, den erst die Lernliste gefangen hätte; der
 - **Grenzen:** der erste Lauf wird nie gefangen (dafür das Scope-Limit); wer in
   unter 2 s explodiert und im Scope gekillt wird, kann dem Beobachter entgehen;
   eine Session ohne Scope (kein Linger, `LOADGUARD_CONFINE=0`) lernt nicht.
+  Unter Codex wird ein einzelner Befehl nicht gelernt (bash `exec`t ihn,
+  keine Shell mit dem Text; unten, k15/k14). Ein unter Claude Code gelernter
+  Befehl, der später unter Codex als einzelner Befehl läuft, wird beim
+  Eintritt verweigert (der Hook vergleicht `tool_input.command`), hält aber
+  keinen Slot, solange er läuft: Der Slot-Scan findet gelernte Befehle nur
+  über die Shell, die ihren Text trägt, und vergleicht argv nicht mit der
+  Liste. Bewusst nicht rekonstruiert (Getty 2026-09-27: der exakte Text,
+  kein argv-Nachbau).
 
 ### Umgesetzt (k15): Lernliste
 
@@ -443,7 +452,10 @@ Tests `t/test_learn.py`, dazu `t/test_cli.py` `Doctor`,
   bei der `;`-Liste, `sleep` lief als Kind. Wie oft bash bleibt, hängt
   davon ab, wie das Modell seine Befehle schreibt (siehe Grenzen).
 - **Offen**: Claude Codes zsh-Wrapper ist nicht aufgezeichnet (dieselbe Form
-  erwartet).
+  erwartet). zsh ist auf reuben nicht installiert (k14), aufzeichnen lässt
+  er sich hier also nicht; gebaut wird dafür nichts. Unter `SHELL=zsh` liest
+  die Extraktion ihn, falls er dieselbe Form hat, sonst gilt er als
+  unbekannte Form: nichts gelernt, kein Slot über die Lernliste.
 
 ### Stufe 4 — Lagebewusstsein (optional)
 
@@ -680,14 +692,16 @@ Umgesetzt (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
   -lc` (vor dem Shell-Snapshot) ist kein erkannter Inline-Code-Schalter:
   Der Codetext wird wie ein Skriptpfad beurteilt und ist nur als nacktes
   `prove` schwer — dann hält die Shell statt prove denselben einen Slot.
-- **Kosmetik, gelassen:** Codex hängt an den Grund `. Command: <cmd>`
+- **Kosmetik, gelassen (bis k14):** Codex hängt an den Grund `. Command: <cmd>`
   (`core/src/hook_runtime.rs:229-234`); unser Grund endet mit `.`, das
   Modell liest `run..`. Ändern hieße, Claude Codes Bytes zu ändern oder den
-  Harness zu erkennen — nicht trivial genug.
+  Harness zu erkennen — nicht trivial genug. Seit k14 erkennt der Hook den
+  Harness (unten).
 - **Grenzen:** Codex legt das `bin/` eines Plugins nicht auf den PATH der
   Shell (nur Paket- und zsh-Pfad, `core/src/tools/runtimes/mod.rs:118-144`)
-  — `loadguard status` in der Kontextzeile findet ein Codex-Modell nicht
-  unter diesem Namen. In der Sandbox ist `/proc` das des eigenen
+  — `loadguard status` in der Kontextzeile fand ein Codex-Modell nicht
+  unter diesem Namen (seit k14 nennt die Zeile es unter Codex nicht mehr).
+  In der Sandbox ist `/proc` das des eigenen
   PID-Namespace (`--proc /proc`): `status`/`explain` von dort sehen nur die
   eigenen Prozesse; vom Terminal aus aufrufen. Hooks laufen erst nach dem
   Trust-Prompt, pro Handler, und eine geänderte hooks.json verlangt neuen
@@ -725,6 +739,76 @@ Umgesetzt (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
     (`python3 -I -c …`). `procs/codex-session.json` folgt dem (k16).
   - Danach der Eintrag in `.agents/plugins/marketplace.json` von
     `Getty/marketplace` (cbdd3af): `codex plugin add loadguard@getty`.
+
+### Umgesetzt (k14): Codex-Nachzügler
+
+`src/loadguard-hook.c` (`CODEX_HEADLESS`, `advice()`, `from_codex()`,
+`objection()`, `situation()`); Tests `t/test_throttle.py` `CodexPayloads`
+(umgestellt), `Decide`, `Slots`, `Matcher`, `t/test_learn.py` `Hook`.
+Quellen: codex-rs `rust-v0.153.4`.
+
+- **`codex review` ist schwer** wie `codex exec`: Es ist `exec` mit einem
+  Review-Auftrag im eigenen Prozess (`cli/src/main.rs:136-141, 1160-1174`:
+  `ExecCli` mit `ExecCommand::Review`, `codex_exec::run_main`), ohne Alias.
+  `K_AGENT`, hält keinen Slot; gesucht wird das Wort wie `exec` irgendwo
+  nach `codex`. Der Rat nennt es mit: „Do not start new `claude -p`/`claude
+  --bg` or `codex exec`/`codex review` sessions now; do the work in this
+  one." Die Kontextzeile nennt weiter nur `claude -p/--bg` (216 Zeichen).
+- **Harness erkennen, Claude Codes Bytes unverändert.** Unter Codex endet
+  (a) der Grund ohne Schlusspunkt — Codex hängt `. Command: <cmd>` an
+  (`core/src/hook_runtime.rs:229-234`), das Modell las live `run..` —, und
+  (b) fehlt der Kontextzeile „; see `loadguard status`": kein Plugin-`bin/`
+  auf dem PATH, in der Sandbox zeigt `/proc` nur die Sandbox. Entscheidung
+  und alles andere bleiben gleich; `--explain` schreibt den Grund wie der
+  Hook für dasselbe Payload.
+- **Signal** (`from_codex()`, kein Dateizugriff: eine Schlüsselsuche im
+  schon geparsten Payload, auf SessionStart zwei `getenv`):
+  - PreToolUse, UserPromptSubmit: `turn_id` als String im Payload. Codex
+    setzt es auf allen turn-bezogenen Eingaben als Pflichtfeld („Codex
+    extension", `hooks/src/schema.rs:280-281, 569-570`, Test
+    `turn_scoped_hook_inputs_include_codex_turn_id_extension`, 1101-1170);
+    Claude Codes PreToolUse und UserPromptSubmit haben keins (aufgezeichnet
+    k7, hooks-Doku gelesen 2026-09-27).
+  - SessionStart: `SessionStartCommandInput` hat kein `turn_id` und kein
+    Feld, das Claude Code nicht auch schickt (`schema.rs:499-510`:
+    `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
+    `permission_mode`, `source`). Deshalb die Umgebung: Codex setzt jedem
+    Hook eines Plugins `PLUGIN_ROOT` und `CLAUDE_PLUGIN_ROOT` auf denselben
+    Pfad (`hooks/src/engine/discovery.rs:262-270`) und scrubbt sie nicht
+    (`protocol/src/shell_environment.rs:14-50`); Claude Code exportiert
+    `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`
+    (hooks-Doku), kein `PLUGIN_ROOT`. Unter Codex läuft loadguard nur als
+    Plugin (sonst findet der Starter kein `$CLAUDE_PLUGIN_DATA`), das Signal
+    fehlt dort also nie. Gleichheit statt bloßem Vorhandensein: Claude Codes
+    Hooks erben Claudes Umgebung, ein `PLUGIN_ROOT` eines anderen Werkzeugs
+    darin zählt nicht.
+  - Verworfen: `transcript_path` (`~/.codex/sessions/…/rollout-*`, darf
+    `null` sein, hängt an `CODEX_HOME`), UUIDv7 der `session_id`,
+    `model`-Namen — Konventionen, keine Zusagen; `CODEX_THREAD_ID` erbt
+    jede Shell von Codex, also auch ein darin gestartetes `claude`.
+  - Ohne Signal gilt Claude Codes Form, wie bis k14. Ein falscher Treffer
+    kostet einen Punkt oder den Hinweis, nie eine Entscheidung.
+  - **Risiko:** Claude Code kennt `turn_id` schon (Eingabe von
+    MessageDisplay, hooks-Doku 2026-09-27). Bekommt auch sein PreToolUse
+    eins, verliert Claude Codes Grund den Punkt — dann auf das
+    Umgebungssignal für alle Ereignisse wechseln.
+- **Grenzen, dokumentiert statt gebaut** (Getty: der exakte Text, keine
+  Rekonstruktion aus argv): ein einzelner Befehl ist unter Codex nicht
+  lernbar (bash `exec`, k15); ein unter Claude Code gelernter wird unter
+  Codex beim Eintritt verweigert, hält laufend aber keinen Slot (Lernliste,
+  Grenzen); Claude Codes zsh-Wrapper bleibt unaufgezeichnet, zsh fehlt auf
+  reuben.
+- **Kosten** (reuben, 313 Prozesse, je 1500 leichte und 500 schwere Läufe,
+  alle vier Fälle je Durchgang verschränkt, HEAD und neu abwechselnd,
+  `nice`, Prozessstart inklusive; Median/p90 in ms): leicht Claude
+  0,502/0,650 → 0,501/0,660, leicht Codex 0,504/0,657 → 0,504/0,651; schwer
+  mit Scan Claude 4,735/5,724 → 4,733/5,916, Codex 4,749/5,880 →
+  4,739/5,831. Kein messbarer Unterschied.
+- **Geprüft:** HEAD- gegen neuen Testtreiber, 6780 Läufe (alle Muster- und
+  leichten Befehle der Tests, synthetisches und aufgezeichnetes
+  Claude-Payload, beide Kontextereignisse, drei Wurzeln, fünf Umgebungen
+  samt Claude Codes, `decide` und `explain`): Unterschiede nur bei
+  `K_AGENT`-Befehlen (Rat) und bei `codex review` (neu schwer).
 
 ## Nicht-Ziele
 

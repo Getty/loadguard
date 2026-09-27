@@ -40,7 +40,7 @@ from test_confine import Base as ConfineBase  # noqa: E402
 from test_confine import SLICE_PATH, real_scope_possible  # noqa: E402
 from test_throttle import (CALM, HOME, PROCS, SLICE_CGROUP,  # noqa: E402
                            THRASH, add_process, add_scenario, base_env,
-                           codex_payload, payload)
+                           codex_payload, codex_spelling, payload)
 
 BIN = {}
 PAGE = os.sysconf("SC_PAGE_SIZE")
@@ -999,13 +999,15 @@ class Hook(unittest.TestCase):
                                          ("deny" if out else "allow",
                                           reason))
 
-    def test_codex_payload_same_bytes(self):
+    def test_codex_payload_same_answer(self):
+        # Until k14 the very bytes of Claude Code's deny; now the reason
+        # drops its final period for Codex (codex_spelling()).
         root = self.tree(THRASH)
         want = self.decide(root, JSON_DATA)
         self.assertTrue(want)
         for fixture in ("pre-tool-use.json", "pre-tool-use-subagent.json"):
             self.assertEqual(self.decide(root, None, codex_payload(
-                fixture, JSON_DATA)), want)
+                fixture, JSON_DATA)), codex_spelling(want))
 
     def test_report(self):
         root = self.tree(CALM)

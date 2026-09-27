@@ -91,13 +91,13 @@ pass at once; the only file the hook reads for them is the learned list
 
 Heavy means the command runs `prove`, `make … test`, `dzil test|build|release`,
 `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
-`perlbench`, or starts a headless agent session: `claude -p`/`--print`/`--bg`
-or `codex exec` — or it is a command loadguard has learned. It is
+`perlbench`, or starts a headless agent session: `claude -p`/`--print`/`--bg`,
+`codex exec` or `codex review` — or it is a command loadguard has learned. It is
 recognised in command position —
 `cd x && FOO=1 nice prove -lr t/` is heavy, `git log --grep=prove` or a
 heredoc that mentions `make test` is not. A running command holds one slot
-however many processes it spawns; a nested `claude -p` or `codex exec` holds
-none, but what it runs does.
+however many processes it spawns; a nested `claude -p`, `codex exec` or
+`codex review` holds none, but what it runs does.
 
 The model sees the refusal as a failed tool call,
 `PreToolUse:Bash hook error: <reason>`, with the reason telling it what is
@@ -147,7 +147,10 @@ longest not seen big goes first), and is yours to read and trim:
 `loadguard learned`, `loadguard forget <n>`. The watcher reads two kernel
 files per process (`stat`, `statm`) and a call's command line once, when it
 crosses the limit; it ends as soon as its session does. A full list of 100
-short commands adds about 0.13 ms to the 0.6 ms of a light command.
+short commands adds about 0.13 ms to the 0.6 ms of a light command. The
+command is read from Claude Code's bash wrapper as recorded (2.1.283); its
+zsh wrapper (`SHELL=zsh`) has not been recorded, and should it differ,
+calls under zsh are not learned.
 
 ### Telling the model before it tries
 
@@ -336,7 +339,8 @@ against the 0.153.4 sources and live with codex-cli 0.153.4): one
 Codex session is confined like a Claude Code session — the `codex` process
 goes into its own scope — and the shell commands the model runs are refused
 under the same rules, with the same reason, whether they come from Claude
-Code or from Codex. A `codex exec` is heavy like `claude -p`. Codex's own
+Code or from Codex. `codex exec` and `codex review` are heavy like
+`claude -p`. Codex's own
 sandbox (`codex-linux-sandbox` and `bwrap`) stays inside the scope and does
 not change how commands are counted.
 
@@ -372,17 +376,23 @@ Differences from Claude Code:
   `bin/` to its shell. Run it by its full path from a terminal:
   `~/.codex/plugins/cache/getty/loadguard/<version>/bin/loadguard status`.
   Inside Codex's sandbox `/proc` shows only the sandbox's own processes, so
-  `status` there would miss the heavy commands of other sessions.
+  `status` there would miss the heavy commands of other sessions. The
+  pressure line therefore ends at "Light commands still run." under Codex,
+  without pointing at `loadguard status`.
 - A refused command reaches the model as
   `Command blocked by PreToolUse hook: <reason>. Command: <command>` —
-  Codex's wrapping around the same reason.
+  Codex's wrapping around the same reason, which loadguard hands over
+  without its final period so that the model reads one, not two.
 - **Learning is narrower.** It reads the command from the shell Codex
   starts (`bash -c <command>`), which holds the command exactly as the
   model sent it (seen live). But bash replaces itself with the
   last command of such a string, so a lone command or `cd x && cmd` leaves
   no shell to read: under Codex only calls that keep their shell
   (pipelines, `;` lists, loops) are learned. Claude Code's calls always
-  keep theirs.
+  keep theirs. For the same reason a command learned under Claude Code
+  that Codex later runs as a lone command is refused when it would start,
+  but holds no heavy slot while it runs: loadguard finds a learned command
+  running only through the shell that carries its text.
 
 ## Develop
 

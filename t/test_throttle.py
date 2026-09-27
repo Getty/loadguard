@@ -264,6 +264,9 @@ HEAVY = {
     "codex -m gpt-6-astra exec --full-auto 'go'": "codex exec",
     "cd x && echo go | codex exec -": "codex exec",
     "~/.local/bin/codex exec resume --last": "codex exec",
+    "codex review": "codex review",
+    "codex review --uncommitted": "codex review",
+    "codex -c model=o3 review --base main": "codex review",
     "cat > x.sh <<-EOF\n\tprove\n\tEOF\nmake test": "make test",
     "cat <<A <<B\nprove\nA\nprove\nB\ncpanm X": "cpanm",
     "echo hi \\\n; prove": "prove",
@@ -286,6 +289,7 @@ LIGHT = [
     "npm install", "npm run lint", "claude --version", "claude mcp list",
     "codex", "codex --version", "codex login", "codex resume --last",
     "codex plugin list", "codex mcp list", "git log --grep='codex exec'",
+    "git log --grep='codex review'",
     "codex-linux-sandbox --sandbox-policy-cwd /w -- /bin/bash -c prove",
     "perl -Ilib t/foo.t", "perl -e 'print 1'", "bash ./run.sh",
     "bash -c 'prove -lr t'",     # inline code is not looked into
@@ -454,6 +458,13 @@ class Slots(Tree):
         root = self.tree(CALM, ["idle-sessions", "codex-exec"])
         self.assertEqual(self.slots(root), (0, []))
 
+    def test_codex_review_holds_no_slot(self):
+        # k14: a running `codex review` is a headless session like exec.
+        root = self.tree(CALM, ["idle-sessions", "codex-exec"])
+        with open(os.path.join(root, "proc", "4501", "cmdline"), "wb") as f:
+            f.write(b"codex\0review\0--uncommitted\0")
+        self.assertEqual(self.slots(root), (0, []))
+
     def test_every_spec_at_once(self):
         root = self.tree(CALM, sorted(
             n[:-5] for n in os.listdir(PROCS) if n.endswith(".json")))
@@ -593,7 +604,9 @@ class Decide(Tree):
                                    "Do not start new `claude -p`"),
                 "podman build .": ("(podman build)", "Wait and retry later"),
                 "codex exec 'go'": ("(codex exec)",
-                                    "`codex exec` sessions now"),
+                                    "`codex exec`/`codex review` sessions"),
+                "codex review": ("(codex review)",
+                                 "`codex exec`/`codex review` sessions"),
         }.items():
             with self.subTest(command=command):
                 reason = self.reason(root, command)
@@ -649,16 +662,20 @@ class Decide(Tree):
         self.assertIn("make test in ~/dev/p5-foo; +1 more)", reason)
 
     def test_agent_advice_names_both(self):
-        # claude -p/--bg and codex exec are one kind (k11): new headless
-        # sessions, refused alike, with the same advice.
+        # claude -p/--bg and codex exec are one kind (k11), codex review too
+        # (k14: exec running a review, cli/src/main.rs:1160-1174): new
+        # headless sessions, refused alike, with the same advice.
         advice = (" Do not start new `claude -p`/`claude --bg` or `codex "
-                  "exec` sessions now; do the work in this one.")
+                  "exec`/`codex review` sessions now; do the work in this "
+                  "one.")
         thrash = self.tree(THRASH)
         busy = self.tree(CALM, ["idle-sessions", "prove-chain"])
         for command, label in (("claude -p 'go'", "claude -p"),
                                ("claude --bg 'go'", "claude --bg"),
                                ("codex exec 'go'", "codex exec"),
-                               ("codex e 'go'", "codex e")):
+                               ("codex e 'go'", "codex e"),
+                               ("codex review --uncommitted",
+                                "codex review")):
             with self.subTest(command=command):
                 for root, env in ((thrash, {}),
                                   (busy, {"LOADGUARD_HEAVY_SLOTS": "1"})):
@@ -1172,15 +1189,46 @@ class Context(Tree):
         self.assertEqual(seen, {True, False})
 
 
-# --- Codex (k11): the same answers to Codex's payloads ----------------------
+# --- Codex (k11, k14): the same answers, spelled for Codex -----------------
+
+# The environment Codex gives every hook of a plugin (codex-rs
+# hooks/src/engine/discovery.rs:262-270) and the one Claude Code gives
+# (hooks docs: CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_PLUGIN_DATA).
+CODEX_PLUGIN = HOME + "/.codex/plugins/cache/getty/loadguard/0.2.0"
+CODEX_DATA = HOME + "/.codex/plugins/data/loadguard-getty"
+CODEX_ENV = {"PLUGIN_ROOT": CODEX_PLUGIN, "CLAUDE_PLUGIN_ROOT": CODEX_PLUGIN,
+             "PLUGIN_DATA": CODEX_DATA, "CLAUDE_PLUGIN_DATA": CODEX_DATA}
+CLAUDE_ENV = {
+    "CLAUDE_PROJECT_DIR": HOME + "/dev/x",
+    "CLAUDE_PLUGIN_ROOT": HOME + "/.claude/plugins/cache/getty/loadguard/"
+                                 "0.2.0",
+    "CLAUDE_PLUGIN_DATA": HOME + "/.claude/plugins/data/loadguard-getty"}
+POINTER = b"; see `loadguard status`."
+
+
+def codex_spelling(out):
+    """What the hook prints for Codex, given what it prints for Claude Code
+    (k14): the deny reason without its final period — Codex appends
+    ". Command: <cmd>" (core/src/hook_runtime.rs:229-234) — and the context
+    line without the pointer to `loadguard status`, which is not on Codex's
+    PATH. Silence stays silence; None if `out` is neither form."""
+    if not out:
+        return out
+    if b'"permissionDecision":"deny"' in out and out.endswith(b'."}}'):
+        return out[:-4] + b'"}}'
+    if out.endswith(POINTER + b'"}}'):
+        return out[:-len(POINTER) - 3] + b'."}}'
+    return None
+
 
 class CodexPayloads(Tree):
     """t/fixtures/codex/: payloads as Codex 0.153.4 builds them (codex-rs
-    hooks/src/schema.rs). The shell tool reaches PreToolUse as tool_name
-    "Bash" with tool_input {"command": …} alone
-    (core/src/tools/handlers/unified_exec/exec_command.rs:504-515). The hook
-    reads the same three fields as in Claude Code's, so the output must be
-    the same bytes."""
+    hooks/src/schema.rs), with the environment Codex gives a plugin's
+    hooks. The shell tool reaches PreToolUse as tool_name "Bash" with
+    tool_input {"command": …} alone
+    (core/src/tools/handlers/unified_exec/exec_command.rs:504-515). The
+    decision reads the same fields as in Claude Code's; since k14 the
+    output is Claude Code's in Codex's spelling (codex_spelling())."""
 
     ROOTS = {"calm": (CALM, ["idle-sessions"]),
              "thrash": (THRASH, ["idle-sessions", "codex-session"]),
@@ -1193,29 +1241,64 @@ class CodexPayloads(Tree):
         self.assertEqual((proc.returncode, proc.stderr), (0, b""))
         return proc.stdout
 
-    def test_pre_tool_use_is_claude_codes(self):
-        commands = list(HEAVY)[:12] + ["codex exec 'go'", "git status",
-                                       "cat prove.txt", "codex --version"]
+    def test_pre_tool_use_is_claude_codes_spelled_for_codex(self):
+        # Until k14 this asserted Claude Code's very bytes for Codex; now
+        # the reason drops its final period. The verdict is the same for
+        # every root, environment and command, and turn_id alone marks a
+        # PreToolUse payload as Codex's, with or without its environment.
+        commands = list(HEAVY)[:12] + ["codex exec 'go'", "codex review",
+                                       "git status", "cat prove.txt",
+                                       "codex --version"]
         seen = set()
         for name, (pressure, scenarios) in self.ROOTS.items():
             root = self.tree(pressure, scenarios)
             for env in self.ENVS:
                 for command in commands:
                     with self.subTest(root=name, env=env, command=command):
-                        want = self.out(root, payload(command), **env)
-                        for fixture in ("pre-tool-use.json",
-                                        "pre-tool-use-subagent.json"):
-                            self.assertEqual(self.out(root, codex_payload(
-                                fixture, command), **env), want)
+                        want = codex_spelling(
+                            self.out(root, payload(command), **env))
+                        self.assertIsNotNone(want)
+                        for fixture, harness in (
+                                ("pre-tool-use.json", {}),
+                                ("pre-tool-use.json", CODEX_ENV),
+                                ("pre-tool-use-subagent.json", CODEX_ENV)):
+                            self.assertEqual(self.out(
+                                root, codex_payload(fixture, command),
+                                **dict(env, **harness)), want)
                         seen.add(b"deny" in want)
         self.assertEqual(seen, {True, False})
+
+    def test_claude_code_bytes_unchanged(self):
+        # k14 changes nothing for Claude Code: its payloads carry no
+        # turn_id, its environment no PLUGIN_ROOT. The bytes of before,
+        # pinned literally.
+        root = self.tree(THRASH)
+        deny = (b'{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+                b'"permissionDecision":"deny","permissionDecisionReason":'
+                b'"loadguard: heavy command refused (make test): memory '
+                b'pressure full=59.9% (limit 10%), swap 100% used (limit '
+                b'90%).\\nWait and retry later; light commands (git status, '
+                b'ls, cat) still run."}}')
+        for env in ({}, CLAUDE_ENV):
+            with self.subTest(env=env):
+                self.assertEqual(self.out(root, payload("make test"), **env),
+                                 deny)
+                for event in CONTEXT_EVENTS:
+                    self.assertEqual(
+                        self.out(root, event_payload(event), **env),
+                        b'{"hookSpecificOutput":{"hookEventName":"'
+                        + event.encode() + b'","additionalContext":"'
+                        + THRASH_LINE.encode() + b'"}}')
 
     def test_codex_deny_is_the_documented_form(self):
         # Codex parses it with deny_unknown_fields (schema.rs:127-140,
         # 241-255) and hands the model "Command blocked by PreToolUse hook:
-        # {reason}. Command: {command}" (core/src/hook_runtime.rs:229-234).
+        # {reason}. Command: {command}" (core/src/hook_runtime.rs:229-234):
+        # one period there since k14, where the model read "still run..".
+        command = "prove -lr t/"
         out = self.out(self.tree(THRASH),
-                       codex_payload("pre-tool-use.json", "prove -lr t/"))
+                       codex_payload("pre-tool-use.json", command),
+                       **CODEX_ENV)
         doc = json.loads(out)
         self.assertEqual(list(doc), ["hookSpecificOutput"])
         self.assertEqual(sorted(doc["hookSpecificOutput"]), [
@@ -1223,19 +1306,80 @@ class CodexPayloads(Tree):
             "permissionDecisionReason"])
         self.assertEqual(doc["hookSpecificOutput"]["permissionDecision"],
                          "deny")
+        shown = "Command blocked by PreToolUse hook: %s. Command: %s" % (
+            doc["hookSpecificOutput"]["permissionDecisionReason"], command)
+        self.assertNotIn("..", shown)
+        self.assertTrue(shown.endswith("still run. Command: prove -lr t/"),
+                        shown)
 
-    def test_context_line_is_claude_codes(self):
+    def test_context_line_without_the_pointer(self):
+        # Until k14 this asserted Claude Code's very bytes for Codex's
+        # context events; now the line drops "; see `loadguard status`":
+        # Codex puts no plugin bin/ on its shell's PATH
+        # (core/src/tools/runtimes/mod.rs:118-144), and in its sandbox
+        # /proc shows the sandbox alone.
+        line = THRASH_LINE[:-len(POINTER)] + "."
         for event, fixture in (("UserPromptSubmit", "user-prompt-submit.json"),
                                ("SessionStart", "session-start.json")):
             for name, (pressure, scenarios) in self.ROOTS.items():
                 root = self.tree(pressure, scenarios)
                 for env in self.ENVS:
                     with self.subTest(event=event, root=name, env=env):
-                        self.assertEqual(
-                            self.out(root, codex_payload(fixture), **env),
+                        want = codex_spelling(
                             self.out(root, event_payload(event), **env))
-            self.assertIn(json.dumps(THRASH_LINE).encode(), self.out(
-                self.tree(THRASH), codex_payload(fixture)))
+                        self.assertIsNotNone(want)
+                        self.assertEqual(self.out(
+                            root, codex_payload(fixture),
+                            **dict(env, **CODEX_ENV)), want)
+            self.assertIn(json.dumps(line).encode(), self.out(
+                self.tree(THRASH), codex_payload(fixture), **CODEX_ENV))
+
+    def test_signal_per_event(self):
+        # UserPromptSubmit (like PreToolUse) carries turn_id, Codex's
+        # extension (schema.rs:569-570). SessionStart carries nothing of
+        # Codex's own (499-510): there only the environment tells —
+        # PLUGIN_ROOT set to the path in CLAUDE_PLUGIN_ROOT, as Codex sets
+        # both for a plugin's hooks (discovery.rs:262-270).
+        root = self.tree(THRASH)
+        prompt = self.out(root, event_payload("UserPromptSubmit"))
+        start = self.out(root, event_payload("SessionStart"))
+        self.assertEqual(self.out(root, codex_payload(
+            "user-prompt-submit.json")), codex_spelling(prompt))
+        self.assertEqual(self.out(root, codex_payload(
+            "user-prompt-submit.json", turn_id=None)), prompt)
+        # Without Codex's environment nothing tells: Claude Code's line.
+        self.assertEqual(self.out(root, codex_payload("session-start.json")),
+                         start)
+        # A PLUGIN_ROOT of another tool, or CLAUDE_PLUGIN_ROOT alone, is not
+        # Codex's environment.
+        for env in ({"PLUGIN_ROOT": CODEX_PLUGIN},
+                    dict(CLAUDE_ENV, PLUGIN_ROOT=CODEX_PLUGIN),
+                    {"CLAUDE_PLUGIN_ROOT": CODEX_PLUGIN}):
+            with self.subTest(env=env):
+                self.assertEqual(self.out(root, event_payload(
+                    "SessionStart"), **env), start)
+        # The environment speaks for SessionStart only; PreToolUse and
+        # UserPromptSubmit go by turn_id.
+        self.assertEqual(self.out(root, event_payload(
+            "UserPromptSubmit"), **CODEX_ENV), prompt)
+        self.assertEqual(self.out(root, payload("make test"), **CODEX_ENV),
+                         self.out(root, payload("make test")))
+
+    def test_explain_is_the_hook(self):
+        # --explain spells the reason as the hook does for the same payload.
+        root = self.tree(THRASH, ["idle-sessions"])
+        for command in ("prove -lr t/", "codex review", "git status"):
+            with self.subTest(command=command):
+                stdin = codex_payload("pre-tool-use.json", command)
+                out = self.out(root, stdin)
+                proc = self.driver("explain", root, stdin)
+                self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+                doc = json.loads(proc.stdout)
+                self.assertEqual(
+                    (doc["decision"], doc["reason"]),
+                    ("deny", json.loads(out)["hookSpecificOutput"][
+                        "permissionDecisionReason"]) if out
+                    else ("allow", None))
 
 
 # --- calibration against the incident snapshots ---------------------------
