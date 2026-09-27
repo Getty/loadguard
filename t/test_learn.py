@@ -9,8 +9,9 @@ setUpModule builds two binaries into a temporary directory:
           `decide`, `explain`, `report`, `slots`
 The watcher runs on /proc and cgroup trees in temporary directories: RSS is
 a number in a statm file, nothing here allocates memory on purpose. The
-Claude Code wrappers are the ones recorded in t/fixtures/shells/, the Codex
-chain the one of t/fixtures/procs/codex-session.json. One test runs the
+Claude Code wrappers and the Codex shell are the ones recorded in
+t/fixtures/shells/, the Codex chain the one of
+t/fixtures/procs/codex-session.json. One test runs the
 production watcher on a real transient scope around `sleep` (skipped
 without busctl, a user bus or memory delegation). Without a C compiler every
 test is skipped.
@@ -31,7 +32,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 sys.path.insert(0, HERE)
 FIXTURES = os.path.join(ROOT, "t", "fixtures")
-RECORDED = os.path.join(FIXTURES, "shells", "claude-code.json")
+SHELLS = os.path.join(FIXTURES, "shells")
 CLI = os.path.join(ROOT, "bin", "loadguard")
 
 from loadguard import build, cli, confine, learn  # noqa: E402
@@ -86,8 +87,8 @@ def stamp(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def recorded():
-    with open(RECORDED, encoding="utf-8") as f:
+def recorded(name="claude-code"):
+    with open(os.path.join(SHELLS, name + ".json"), encoding="utf-8") as f:
         return json.load(f)["cases"]
 
 
@@ -187,14 +188,27 @@ class Extract(unittest.TestCase):
                 for harness in ("claude", "codex", "any"):
                     self.assertIsNone(self.extract(argv, harness))
 
+    def test_recorded_codex_shell(self):
+        # Live, codex-cli 0.153.4: the shell's argv[2] is the model's
+        # command byte for byte, and only the codex form reads it.
+        cases = recorded("codex")
+        self.assertEqual(len(cases), 1)
+        for case in cases:
+            with self.subTest(case=case["case"]):
+                for harness in ("codex", "any"):
+                    self.assertEqual(self.extract(case["argv"], harness),
+                                     case["command"])
+                self.assertIsNone(self.extract(case["argv"], "claude"))
+
     def test_codex_takes_the_string(self):
         # Codex runs `<shell> -c|-lc <command>`; with its shell snapshot the
         # script execs exactly that (codex-rs core/src/shell.rs:22-31,
-        # tools/runtimes/mod.rs:225-302). Not yet checked against a live
-        # Codex payload.
+        # tools/runtimes/mod.rs:225-302), as recorded above; the chain's
+        # shell has that form.
         chain = codex_chain()
         argv = chain[7203]["argv"]
-        self.assertEqual(argv, ["/bin/bash", "-c", "prove -lr t/"])
+        self.assertEqual(argv, ["/bin/bash", "-c",
+                                'prove -lr t/; echo "exit $?"'])
         for shell in ("/bin/bash", "/usr/bin/zsh", "sh", "/bin/dash"):
             for flag in ("-c", "-lc"):
                 with self.subTest(shell=shell, flag=flag):
@@ -527,7 +541,8 @@ class Watch(unittest.TestCase):
     def test_codex_session(self):
         # The sandbox helpers (codex-linux-sandbox, bwrap, the helper as
         # PID 1) are no shells: the call is `bash -c <command>` inside,
-        # its argv[2] the command.
+        # its argv[2] the command — a `;` list, so bash stays.
+        command = JSON_DATA + '; echo "exit $?"'
         chain = codex_chain()
         procs = []
         for pid in (7100, 7110, 7200, 7201, 7202, 7203):
@@ -535,7 +550,7 @@ class Watch(unittest.TestCase):
             procs.append(proc_spec(pid, p["ppid"], p["comm"], p["argv"],
                                    8 * MIB, p["cwd"], 30 if pid == 7100
                                    else 100))
-        procs[-1]["argv"] = ["/bin/bash", "-c", JSON_DATA]
+        procs[-1]["argv"] = ["/bin/bash", "-c", command]
         procs.append(proc_spec(7204, 7203, "perl", ["/usr/bin/perl",
                                                     "t/json_data.t"],
                                3 * GIB, chain[7203]["cwd"]))
@@ -543,7 +558,7 @@ class Watch(unittest.TestCase):
                  self.root(procs[:-2], CODEX_SCOPE_PATH)]
         events, _ = self.watch(roots, session=7100)
         self.assertEqual(self.events(events), [(1, "learn"), (2, "end")])
-        self.assertEqual(self.learned()[0]["command"], JSON_DATA)
+        self.assertEqual(self.learned()[0]["command"], command)
         self.assertEqual(self.learned()[0]["cwd"], HOME + "/dev/simpici")
 
     def test_codex_lone_command_leaves_no_shell(self):

@@ -1,0 +1,14 @@
+{
+ "comment": "Recorded 2026-09-27 on reuben with codex-cli 0.153.4 (loadguard 0.2.0 installed, shell snapshot on): the shell of one exec_command call of the model, its argv as /proc showed it while `sleep 45` ran. `command` is the model's `cmd` as the session's rollout holds it (Codex passes it to PreToolUse as tool_input.command), `argv` the shell's argv. Read-only, no load.",
+ "cases": [
+  {
+   "case": "list",
+   "command": "sleep 45; echo \"lg probe\" 'x'",
+   "argv": [
+    "/bin/bash",
+    "-c",
+    "sleep 45; echo \"lg probe\" 'x'"
+   ]
+  }
+ ]
+}

@@ -72,7 +72,7 @@ The model sent `description` and `timeout`; `updatedInput` carried only `command
 
 Asserted by `t/test_updated_input.py`.
 
-## `shells/` — recorded, the shell behind a Bash call (k15)
+## `shells/` — recorded, the shell behind a Bash call (k15, Codex k16)
 
 `claude-code.json`: ten Bash tool calls of a Claude Code 2.1.283 session on
 reuben, 2026-09-27, each ending in a script that copied its parent's
@@ -94,11 +94,22 @@ argv[0..1] `/bin/bash`, `-c`; argv[2]:
   and trailing blanks), `stdin-reader`, `continuation-subst` (`\<newline>`,
   `$(…)`), `sleep-then`.
 
+`codex.json`: one `exec_command` call of a Codex session (codex-cli
+0.153.4, loadguard 0.2.0 installed) on reuben, 2026-09-27 — Getty's live
+test. `command` is the model's `cmd` as the session's rollout holds it
+(Codex passes it to PreToolUse as `tool_input.command`), `argv` the argv of
+the shell running it, read from `/proc` while its `sleep 45` ran (no load).
+argv is `/bin/bash`, `-c`, the command unchanged: the shell snapshot's
+script `exec`s `/bin/bash -c '<command>'` (the rollout records the call as
+`/bin/bash -lc <command>`, the form Codex wraps in that script). Case `list`
+(`sleep 45; echo "lg probe" 'x'`: quotes, a `;` list, so bash stays with
+`sleep` as its child).
+
 `t/test_learn.py` requires the extraction to give back `command` byte for
-byte, and builds its scenario wrappers the same way (`claude_wrapper()`,
-checked against these). The Codex shell comes from
-`procs/codex-session.json` (pid 7203, `/bin/bash -c <command>`); whether its
-argv[2] equals the PreToolUse `tool_input.command` is not yet checked live.
+byte — Claude Code's form from `claude-code.json`, Codex's from
+`codex.json` — and builds its scenario wrappers the same way
+(`claude_wrapper()`, checked against these). The Codex chain's shell,
+`procs/codex-session.json` pid 7203, has the recorded form.
 
 # Measurement fixtures
 
@@ -153,7 +164,7 @@ to record these.
 | `claude-p-prove.json` | the `claude -p` above runs `prove -l t/foo.t` (needs `claude-p`) | 1 |
 | `npm-title.json` | B runs `npm test` (title `npm test`), which runs `sh -c 'prove -lr t'` | 1 |
 | `codex-exec.json` | A started `codex exec`, idle, in A's scope (k11) | 0 |
-| `codex-session.json` | a Codex TUI session in its own scope runs `prove -lr t/` through its Linux sandbox (k11, below) | 1 |
+| `codex-session.json` | a Codex TUI session in its own scope runs `prove -lr t/; echo "exit $?"` through its Linux sandbox (k11, below) | 1 |
 
 PIDs are disjoint across specs, so tests combine them (all eight: 5 slots).
 
@@ -161,15 +172,19 @@ PIDs are disjoint across specs, so tests combine them (all eight: 5 slots).
 
 Reconstructed from the codex-rs `rust-v0.153.4` sources for reuben's setup
 (`sandbox_mode = "workspace-write"`, no system `bwrap`, so the bundled
-`codex-resources/bwrap`); no Codex command was run to record it.
+`codex-resources/bwrap`), then seen so in Getty's live test on 2026-09-27
+(codex-cli 0.153.4, the `codex.json` call, read-only): the same processes
+from `codex` down to the command, their argv beginning as below, bwrap's
+comm `3`. Beside the chain that session had `codex-code-mode-host` and an
+MCP server run as `python3 -I -c …`; the spec keeps an npm one there.
 
 | PID | comm | argv | Source |
 |---|---|---|---|
 | 7100 | `codex` | `codex` — the TUI, hosting the thread in-process | `tui/src/lib.rs:255-282` |
 | 7200 | `codex-linux-san` | `~/.codex/tmp/arg0/codex-arg0XXXXXX/codex-linux-sandbox --sandbox-policy-cwd … --command-cwd … --permission-profile <json> -- /bin/bash -c <script>` | `sandboxing/src/manager.rs:414-443, 731-737`, `sandboxing/src/landlock.rs:23-58`, `arg0/src/lib.rs:355-425` (a symlink to codex; comm is cut to 15 bytes) |
-| 7201 | `5` | `bwrap --as-pid-1 --new-session --die-with-parent <mounts> --unshare-user --unshare-pid --unshare-ipc --unshare-net --proc /proc --chdir … --cap-drop ALL --argv0 codex-linux-sandbox -- <codex> … --apply-seccomp-then-exec -- /bin/bash -c <script>` | `linux-sandbox/src/linux_run_main.rs:393-469, 475-506, 555-615`, `bwrap.rs:308-357`, `launcher.rs:38-57`; the bundled bwrap is exec'd through `/proc/self/fd/N` (`bundled_bwrap.rs:36-72`), so comm is that number |
+| 7201 | `3` | `bwrap --as-pid-1 --new-session --die-with-parent <mounts> --unshare-user --unshare-pid --unshare-ipc --unshare-net --proc /proc --chdir … --cap-drop ALL --argv0 codex-linux-sandbox -- <codex> … --apply-seccomp-then-exec -- /bin/bash -c <script>` | `linux-sandbox/src/linux_run_main.rs:393-469, 475-506, 555-615`, `bwrap.rs:308-357`, `launcher.rs:38-57`; the bundled bwrap is exec'd through `/proc/self/fd/N` (`bundled_bwrap.rs:36-72`), so comm is that number (`3` live) |
 | 7202 | `codex` | `codex-linux-sandbox … --apply-seccomp-then-exec -- /bin/bash -c <script>` — PID 1 of the new namespaces, forks the command and waits | `linux_run_main.rs:192-259, 1511-1550` |
-| 7203 | `bash` | `/bin/bash -c 'prove -lr t/'` | `core/src/shell.rs:22-31`; with the shell snapshot (default) Codex runs `bash -c ". <snapshot>; exec '/bin/bash' -c '<cmd>'"`, the exec leaves this argv (`core/src/tools/runtimes/mod.rs:225-302`) |
+| 7203 | `bash` | `/bin/bash -c 'prove -lr t/; echo "exit $?"'` | `core/src/shell.rs:22-31`; with the shell snapshot (default) Codex runs `bash -c ". <snapshot>; exec '/bin/bash' -c '<cmd>'"`, the exec leaves this argv (`core/src/tools/runtimes/mod.rs:225-302`; live: `shells/codex.json`). bash stays for a `;` list; a lone command it would `exec` (bash 5.2), leaving prove directly under 7202 (`test_codex_lone_command_leaves_no_shell`) |
 | 7204, 7205 | `prove`, `perl` | as in `prove-chain.json` | |
 
 Simplified: the mounts, and the permission profile JSON (no entries);

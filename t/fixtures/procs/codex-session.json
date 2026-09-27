@@ -1,5 +1,5 @@
 {
- "comment": "A Codex TUI session (own scope, k11) runs `prove -lr t/` through its Linux sandbox: helper, bundled bwrap, the helper again inside the namespaces, bash, prove, a test child. Busy: 1.",
+ "comment": "A Codex TUI session (own scope, k11) runs `prove -lr t/; echo \"exit $?\"` through its Linux sandbox: helper, bundled bwrap, the helper again inside the namespaces, bash (it stays for a `;` list; a lone command would replace it), prove, a test child. Busy: 1.",
  "processes": [
   {
    "pid": 7100,
@@ -44,7 +44,7 @@
     "--",
     "/bin/bash",
     "-c",
-    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/; echo \"exit $?\"'"
    ],
    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
    "cwd": "/home/getty/dev/simpici"
@@ -52,7 +52,7 @@
   {
    "pid": 7201,
    "ppid": 7200,
-   "comm": "5",
+   "comm": "3",
    "argv": [
     "bwrap",
     "--as-pid-1",
@@ -93,7 +93,7 @@
     "--",
     "/bin/bash",
     "-c",
-    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/; echo \"exit $?\"'"
    ],
    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
    "cwd": "/home/getty/dev/simpici"
@@ -114,7 +114,7 @@
     "--",
     "/bin/bash",
     "-c",
-    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/'"
+    "if . '/home/getty/.codex/shell_snapshots/019a7c3e-5d21-7b40-9f3a-2c8e61d4b7a9.1790412345678901234.sh' >/dev/null 2>&1; then :; fi\n\nexec '/bin/bash' -c 'prove -lr t/; echo \"exit $?\"'"
    ],
    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
    "cwd": "/home/getty/dev/simpici"
@@ -126,7 +126,7 @@
    "argv": [
     "/bin/bash",
     "-c",
-    "prove -lr t/"
+    "prove -lr t/; echo \"exit $?\""
    ],
    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-loadguard.slice/loadguard-019a7c3e-7100.scope",
    "cwd": "/home/getty/dev/simpici"

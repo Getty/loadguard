@@ -195,8 +195,9 @@ Built:
 - **The CLI** (below): `loadguard status`, `doctor`, `explain '<cmd>'`,
   `learned`, `forget`.
 - **Codex support** (below), built against the Codex 0.153.4 sources and
-  tested on reconstructed payloads; the first live run under Codex is still
-  ahead.
+  confirmed in a live run with codex-cli 0.153.4: the session is confined,
+  the pressure line arrives, heavy commands are refused, and the shell
+  holds the exact command text that learning reads.
 
 The design, with the measurements behind each decision, is in
 [`docs/design.md`](docs/design.md) (German).
@@ -305,8 +306,9 @@ claude plugin install loadguard@getty
 Or from inside Claude Code: `/plugin marketplace add Getty/marketplace`, then
 `/plugin install loadguard@getty`. New sessions are confined from then on.
 The first session start builds the hook in the background, which takes a few
-seconds; until it exists nothing is refused. `loadguard doctor`, run from a
-new session, shows whether everything is in place.
+seconds; until it exists nothing is refused and no pressure line is shown,
+and that first session gets no watcher, so it learns nothing. `loadguard
+doctor`, run from a new session, shows whether everything is in place.
 
 To update, run `claude plugin update loadguard@getty` and start a new
 session. If the hook's sources changed, it rebuilds on that session start.
@@ -329,16 +331,16 @@ in its scope until it ends.
 ## Codex
 
 The same plugin works under [Codex](https://github.com/openai/codex) (checked
-against the 0.153.4 sources): one `hooks/hooks.json` serves both, and Codex
-fires the same three events. Each Codex session is confined like a Claude
-Code session — the `codex` process goes into its own scope — and the shell
-commands the model runs are refused under the same rules, with the same
-reason, whether they come from Claude Code or from Codex. A `codex exec` is
-heavy like `claude -p`. Codex's own sandbox (`codex-linux-sandbox` and
-`bwrap`) stays inside the scope and does not change how commands are
-counted.
+against the 0.153.4 sources and live with codex-cli 0.153.4): one
+`hooks/hooks.json` serves both, and Codex fires the same three events. Each
+Codex session is confined like a Claude Code session — the `codex` process
+goes into its own scope — and the shell commands the model runs are refused
+under the same rules, with the same reason, whether they come from Claude
+Code or from Codex. A `codex exec` is heavy like `claude -p`. Codex's own
+sandbox (`codex-linux-sandbox` and `bwrap`) stays inside the scope and does
+not change how commands are counted.
 
-**The Codex marketplace entry is not published yet.** Once it is:
+Install it from the same marketplace:
 
 ```sh
 codex plugin marketplace add Getty/marketplace
@@ -350,9 +352,13 @@ five, and again whenever `hooks/hooks.json` changes. Until you do, loadguard
 is installed but silent: nothing is confined, nothing refused, no error.
 Non-interactive runs (`codex exec`) cannot grant that trust; start `codex`
 once and accept the prompt. To update, run `codex plugin add loadguard@getty`
-again; to remove it, `codex plugin remove loadguard@getty`. The environment
-variables under [Configuration](#configuration) apply unchanged, read from
-the environment `codex` was started with.
+again; to remove it, `codex plugin remove loadguard@getty`. As under Claude
+Code (see [Install](#install)), the first session after installing starts
+while the hook is still building: its first prompt gets no pressure line
+and the session no watcher; refusing starts a few seconds in, once the
+build is done. The environment variables under
+[Configuration](#configuration) apply unchanged, read from the environment
+`codex` was started with.
 
 Differences from Claude Code:
 
@@ -371,8 +377,8 @@ Differences from Claude Code:
   `Command blocked by PreToolUse hook: <reason>. Command: <command>` —
   Codex's wrapping around the same reason.
 - **Learning is narrower.** It reads the command from the shell Codex
-  starts (`bash -c <command>`), which by Codex's sources is the command as
-  sent — not yet confirmed in a live run. And bash replaces itself with the
+  starts (`bash -c <command>`), which holds the command exactly as the
+  model sent it (seen live). But bash replaces itself with the
   last command of such a string, so a lone command or `cd x && cmd` leaves
   no shell to read: under Codex only calls that keep their shell
   (pipelines, `;` lists, loops) are learned. Claude Code's calls always

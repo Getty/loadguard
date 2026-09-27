@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Codex support is confirmed live (k16): the session is confined, the
+  pressure line reaches the model, heavy commands are refused, and the
+  shell Codex runs a command in holds the exact command text that
+  learning reads. loadguard installs under Codex from the marketplace
+  (`codex plugin add loadguard@getty`); the first session after
+  installing gets no pressure line on its first prompt and no watcher
+  while the hook builds.
+
 ## 0.2.0 - 2026-09-27
 
 - loadguard learns heavy commands (k15). Each confined session gets a

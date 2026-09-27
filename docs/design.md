@@ -293,8 +293,9 @@ Snapshots zeigt einen Fall, den erst die Lernliste gefangen hätte; der
   `'\''` — k15 unten), ist `tool_input.command`
   (live 2026-09-26 für einen einfachen Befehl gesehen; Quotes, Zeilenumbrüche,
   Heredocs, `run_in_background`: aufgezeichnet in k15). Codex: `bash -c|-lc
-  <cmd>` hinter der Sandbox-Kette, argv[2] = der Befehl (live beim Codex-Test
-  zu prüfen). Nicht lesbar oder unbekannte Form → nichts gelernt.
+  <cmd>` hinter der Sandbox-Kette, argv[2] = der Befehl (live bestätigt
+  2026-09-27, `t/fixtures/shells/codex.json`). Nicht lesbar oder unbekannte
+  Form → nichts gelernt.
 - **Sofort schreiben:** beim ersten Reißen der Schwelle, nicht erst am Ende —
   ein Thrash-Reboot mitten im Befehl darf die Lektion nicht verlieren. Danach
   schreibt der Beobachter den Spitzenwert nur neu, wenn er um mindestens 10 %
@@ -428,17 +429,21 @@ Tests `t/test_learn.py`, dazu `t/test_cli.py` `Doctor`,
   denen bash bleibt (Pipes, `;`-Listen, Schleifen), liefern argv[2]
   (`test_codex_lone_command_leaves_no_shell`). Claude Code betrifft das
   nicht: Nach dem `eval` folgt `&& pwd -P …`, die Shell bleibt (so
-  aufgezeichnet). Dieselbe Beobachtung heißt: `procs/codex-session.json`
-  (k11, bash 7203 → prove 7204 für `prove -lr t/`) zeigt vermutlich eine
-  Shell, die es so nicht gibt; die Slot-Zählung beurteilt argv und bleibt
-  richtig. Überlebt ein `claude --bg` die Session, deren Scope er teilt,
-  endet der Beobachter mit dem Scope-Eigner; der Rest läuft unbeobachtet
-  weiter. Ein Befehl, den der Beobachter unter Codex liest, der aber anders
+  aufgezeichnet). Deshalb führt `procs/codex-session.json` seit k16 eine
+  `;`-Liste aus (`prove -lr t/; echo "exit $?"`: bash 7203 → prove 7204),
+  wie live gesehen; mit `prove -lr t/` allein gäbe es bash 7203 nicht. Die
+  Slot-Zählung beurteilt argv, es bleibt ein Slot. Überlebt ein `claude
+  --bg` die Session, deren Scope er teilt, endet der Beobachter mit dem
+  Scope-Eigner; der Rest läuft unbeobachtet weiter. Ein Befehl, den der Beobachter unter Codex liest, der aber anders
   ankommt als gesendet, landet als Text, der nie trifft.
-- **Offen**: Codex live — ob argv[2] der Shell gleich `tool_input.command`
-  ist (nach den Quellen ja: das Snapshot-Skript `exec`t genau den Befehl),
-  und wie oft bash dort bleibt (siehe Grenzen).
-  Claude Codes zsh-Wrapper ist nicht aufgezeichnet (dieselbe Form erwartet).
+- **Codex live bestätigt** (2026-09-27, codex-cli 0.153.4): argv[2] der
+  Shell ist der Befehl des Modells, Byte für Byte — das Snapshot-Skript
+  `exec`t genau ihn (`sleep 45; echo "lg probe" 'x'`,
+  `t/fixtures/shells/codex.json`, `test_recorded_codex_shell`). bash blieb
+  bei der `;`-Liste, `sleep` lief als Kind. Wie oft bash bleibt, hängt
+  davon ab, wie das Modell seine Befehle schreibt (siehe Grenzen).
+- **Offen**: Claude Codes zsh-Wrapper ist nicht aufgezeichnet (dieselbe Form
+  erwartet).
 
 ### Stufe 4 — Lagebewusstsein (optional)
 
@@ -688,8 +693,38 @@ Umgesetzt (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
   Trust-Prompt, pro Handler, und eine geänderte hooks.json verlangt neuen
   Trust (`discovery.rs:676-725, 794-812`); `codex exec` kann ihn nicht
   erteilen.
-- **Offen: Live-Test mit Getty** (Trust-Prompt), danach der Eintrag in
-  `~/dev/marketplace/.agents/plugins/marketplace.json`.
+- **Live bestätigt (2026-09-27)** mit Getty: codex-cli 0.153.4, loadguard
+  0.2.0 aus dem Marketplace `getty-dev`, `LOADGUARD_PSI_FULL=1
+  LOADGUARD_SWAP_USED=1`, damit die ruhige Lage als Druck gilt — ohne Last.
+  Belege im Rollout der Session
+  (`~/.codex/sessions/2026/09/27/rollout-2026-09-27T02-13-01-01a0e035-….jsonl`):
+  - Einsperren: codex (pid 352696) in `loadguard-01a0e035-352696.scope`,
+    Beschreibung `loadguard: codex session 01a0e035-…`.
+  - Erster Prompt direkt nach der Installation: keine Kontextzeile
+    (SessionStart und UserPromptSubmit 02:13:04, Binary erst 02:13:07
+    gebaut), kein Beobachter in dieser Session (confine lief vor dem Build)
+    — wie für die erste Session beschrieben (Lernliste, Stufe 4).
+    PreToolUse griff um 02:13:09 schon.
+  - Zweiter Prompt: die Kontextzeile kommt als developer-Nachricht an;
+    `git status` läuft, `make test` und `codex exec` werden verweigert, der
+    Grund mit angehängtem `. Command: <cmd>` — das `..` von oben (k14).
+  - Codex rief die Befehle über code mode auf (`exec` →
+    `tools.exec_command({cmd: …})`); der Hook griff trotzdem.
+  - Shell: `sleep 45; echo "lg probe" 'x'` lief als `/bin/bash -c <cmd>`,
+    argv[2] Byte für Byte der `cmd` des Modells
+    (`t/fixtures/shells/codex.json`); der Rollout nennt den Aufruf
+    `/bin/bash -lc <cmd>`, die Form vor dem Snapshot-Skript. bash blieb
+    (`;`-Liste), `sleep` als Kind.
+  - Kette im Scope wie aus den Quellen rekonstruiert: codex →
+    `codex-linux-sandbox` (argv[0]
+    `~/.codex/tmp/arg0/codex-arg0XXXX/codex-linux-sandbox`,
+    `--sandbox-policy-cwd … --command-cwd …`) → bwrap (`comm` `3`,
+    `bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / …`) →
+    `codex-linux-sandbox` (`comm` `codex`) → `/bin/bash -c <cmd>` →
+    `sleep 45`; daneben `codex-code-mode-host` und ein MCP-Server
+    (`python3 -I -c …`). `procs/codex-session.json` folgt dem (k16).
+  - Danach der Eintrag in `.agents/plugins/marketplace.json` von
+    `Getty/marketplace` (cbdd3af): `codex plugin add loadguard@getty`.
 
 ## Nicht-Ziele
 
