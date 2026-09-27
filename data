@@ -1,0 +1,39 @@
+---
+claimed_at: 2026-09-27T01:19:55Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-09-27T01:19:55Z
+created: 2026-09-26T06:31:53Z
+id: 14
+priority: high
+started: 2026-09-27T00:51:19Z
+status: done
+tags:
+- codex
+title: 'Codex-Nachzügler: codex review, loadguard status ohne PATH, doppelter Punkt'
+updated: 2026-09-27T01:19:55Z
+---
+
+Aus k11 (07a8d67), nichts davon blockiert: (1) codex review ist ebenfalls eine nicht-interaktive Session, bisher leicht - in K_AGENT aufnehmen? (2) Codex legt kein Plugin-bin/ auf den Shell-PATH (core/src/tools/runtimes/mod.rs:118-144): die Lage-Zeile nennt 'loadguard status', das unter Codex nicht gefunden wird; in Codex' Sandbox zeigt /proc zudem nur die Sandbox-Prozesse. (3) Codex hängt '. Command: <cmd>' an den Grund (core/src/hook_runtime.rs:229-234) -> '..' am Ende. Erst nach dem Live-Test mit Getty angehen.
+
+2026-09-27 Aus k15 (Orchestrator): (4) bash 5.2 ersetzt sich bei 'bash -c' durch den letzten Befehl (exec) - unter Codex hat ein einzelner Befehl oder 'cd x && cmd' keine Shell mehr, aus der die Lernliste den Text lesen könnte; gelernt wird nur, wo bash bleibt (Pipes, ;-Listen, Schleifen). Claude Code nicht betroffen (Wrapper endet mit '&& pwd -P'). Beim Codex-Live-Test prüfen: argv[2] == tool_input.command? Wie oft bleibt bash? (5) Fixture procs/codex-session.json zeigt vermutlich eine bash, die es wegen dieses exec nicht gibt - Slot-Zählung unberührt, Fixture nach dem Live-Test korrigieren. (6) Claude Codes zsh-Wrapper (SHELL=zsh) ist nicht aufgezeichnet.
+
+2026-09-27 Vorgabe (Orchestrator, Getty: 'k14 auch gleich fertig', nach k16):
+(1) codex review = schwer wie codex exec (K_AGENT, hält keinen Slot; codex --help: 'Run a code review non-interactively', kein Alias). Rat im Deny-Grund nennt es mit, soweit er lesbar bleibt.
+(2)+(3) Harness-Erkennung im Hook, damit Claude Codes Bytes gleich bleiben: unter Codex (a) Kontextzeile OHNE 'see `loadguard status`' (Codex legt bin/ nicht auf den PATH, und in der Sandbox zeigt /proc nur die Sandbox), (b) Deny-Grund ohne abschließenden Punkt (Codex hängt '. Command: <cmd>' an, core/src/hook_runtime.rs:229-234; live 2026-09-27 als '..' gesehen). Signal: turn_id im Payload (Codex-Erweiterung auf PreToolUse und UserPromptSubmit, bei Claude Code nicht vorhanden); für SessionStart ein belastbares Signal aus den codex-rs-Quellen (rust-v0.153.4) wählen und begründen — kein zusätzlicher Dateizugriff auf dem leichten Pfad. Tests: Claude-Code-Payloads byte-gleich wie bisher, Codex-Payloads ohne Hinweis/Punkt; bestehender Test 'Codex = byte-gleich' wird bewusst angepasst (vorher sagen, was er behauptet).
+(4) Einzelbefehl unter Codex nicht lernbar (bash exec): bleibt dokumentierte Grenze — Getty will den exakten Text, keine Rekonstruktion aus argv.
+(5) erledigt in k16.
+(6) zsh ist auf reuben nicht installiert -> Claude Codes zsh-Wrapper nicht aufzeichenbar; als unaufgezeichnet dokumentieren, nichts bauen.
+Doku: README Codex-Abschnitt (Unterschiede), design.md Codex, CHANGELOG Unreleased. Danach Release 0.2.1.
+
+2026-09-27 Aus k16 (Worker-Befunde, mit erledigen): (7) Ein unter Claude Code gelernter Einzelbefehl, der später unter Codex läuft, wird beim Eintritt verweigert, hält aber keinen Slot, solange er läuft (bash exec, keine Shell mit dem Text; der Slot-Scan vergleicht argv nicht mit der Liste) — in design.md Grenzen und README ehrlich benennen, nicht rekonstruieren. (8) Kommentar src/loadguard-hook.c ~714-721 'not yet checked against a live Codex payload' -> live bestätigt 2026-09-27 (k16). (9) .claude/skills/loadguard-core/SKILL.md:187 'Codex: argv[2] (not yet confirmed live)' -> bestätigt. (10) Rollout zeichnet '/bin/bash -lc <cmd>' auf, der Prozess lief als '-c' (Snapshot-Skript exect) — nur falls relevant für die Doku.
+
+2026-09-27 00:58 Worker start. Befunde aus codex-rs rust-v0.153.4: (1) codex review = ExecCli mit ExecCommand::Review, codex_exec::run_main wie exec (cli/src/main.rs:136-141, 1160-1174) -> eigener Prozess, K_AGENT passt. (2)+(3) SessionStartCommandInput hat kein turn_id und kein Codex-eigenes Feld (hooks/src/schema.rs:499-510: session_id, transcript_path, cwd, hook_event_name, model, permission_mode, source); turn_id ist Pflicht auf den turn-scoped Inputs (schema.rs:280-281, 569-570, Test 1101-1170). Signal fuer SessionStart: Umgebung - Codex setzt jedem Plugin-Hook PLUGIN_ROOT und CLAUDE_PLUGIN_ROOT auf denselben Wert (hooks/src/engine/discovery.rs:262-270), nicht gescrubbt (protocol/src/shell_environment.rs:14-50); Claude Code exportiert nur CLAUDE_PROJECT_DIR/CLAUDE_PLUGIN_ROOT/CLAUDE_PLUGIN_DATA (+CLAUDE_ENV_FILE). getenv = kein Dateizugriff. Risiko notiert: Claude Code kennt turn_id schon (MessageDisplay-Input, hooks-Doku 2026-09-27) - fuegt es das PreToolUse hinzu, verlöre Claude Codes Grund den Punkt (kosmetisch).
+
+2026-09-27 01:05 Code steht: CODEX_HEADLESS += review; K_AGENT-Rat nennt `codex exec`/`codex review`; from_codex(payload, event): turn_id (String) fuer PreToolUse/UserPromptSubmit, fuer SessionStart PLUGIN_ROOT == CLAUDE_PLUGIN_ROOT in der Umgebung; objection() nimmt codex und streicht den Schlusspunkt, situation() laesst '; see `loadguard status`' weg. Kommentar shell_command -> live bestaetigt (k16). Differenzcheck HEAD- gegen neuen Treiber, 6780 Laeufe (alle HEAVY/LIGHT, synthetisches und aufgezeichnetes Claude-Payload, beide Kontext-Events, 3 Wurzeln, 5 Umgebungen inkl. Claude-Code-Env, decide+explain): Unterschiede nur bei K_AGENT-Befehlen (Rat) und codex review (neu schwer). Tests umgestellt (Regel 6, vorher benannt): CodexPayloads.test_pre_tool_use_is_claude_codes und test_context_line_is_claude_codes behaupteten Claude Codes Bytes fuer Codex-Payloads -> jetzt codex_spelling(); test_learn test_codex_payload_same_bytes ebenso. Neu: test_claude_code_bytes_unchanged (Literale), test_signal_per_event, test_explain_is_the_hook (Codex), test_codex_review_holds_no_slot.
+
+2026-09-27 01:12 Messung (reuben, 313 Prozesse, Produktions-Binarys HEAD vs neu, je 1500 leicht / 500 schwer, alle vier Faelle je Durchgang verschraenkt, abwechselnd, nice, Prozessstart inkl.; Median/p90 ms): leicht Claude 0.502/0.650 -> 0.501/0.660, leicht Codex 0.504/0.657 -> 0.504/0.651, schwer Claude 4.735/5.724 -> 4.733/5.916, schwer Codex 4.749/5.880 -> 4.739/5.831 - kein messbarer Unterschied. Doku: design.md (Lernliste Grenzen (7), Offen zsh (6), Codex Kosmetik/Grenzen, neu 'Umgesetzt (k14)'), README (Heavy-Liste, Codex-Abschnitt, zsh-Satz), CHANGELOG Unreleased (3 Eintraege k14), SKILL loadguard-core (1)-(3),(9), t/fixtures/README.md. hooks/ unveraendert. Verifiziert: nice make clean && nice make ok; volle Suite 333 Tests OK, 0 Skips (vorher 329; +4 neu).
+
+2026-09-27 01:12 Done: codex review schwer (K_AGENT, kein Slot, Rat nennt es); Harness-Erkennung from_codex(): turn_id fuer PreToolUse/UserPromptSubmit, PLUGIN_ROOT==CLAUDE_PLUGIN_ROOT fuer SessionStart (codex-rs discovery.rs:262-270, schema.rs:499-510); unter Codex Grund ohne Schlusspunkt, Kontextzeile ohne 'see loadguard status'; Claude Codes Bytes identisch (Differenzcheck 6780 Laeufe gegen HEAD, Literal-Test). Grenzen (4),(6),(7) dokumentiert, (8),(9) Kommentare/Skill auf 'live bestaetigt'. Tests 333 OK, 0 Skips; Kosten unveraendert. Nicht committet; Vorschlag: 'Spell loadguard's answers for Codex and make codex review heavy (k14)'. Offen: Risiko turn_id in Claude Codes MessageDisplay (ggf. spaeter Env-Signal fuer alle Events); Codex-Kontextzeile haette nach Wegfall des Hinweises Platz fuer 'codex exec' statt 'claude -p/--bg' - nicht gemacht (nicht in der Vorgabe).
+
+2026-09-27 01:19 Committed e4f8b7f (Spell loadguard's answers for Codex and make codex review heavy (k14)) and 41910d3 (Release 0.2.1). 333 tests OK, 0 skipped (run before each commit, checked /proc/pressure/memory full avg10 < 10 before running).
