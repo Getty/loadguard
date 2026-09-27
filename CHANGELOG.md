@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-27
+
 - Codex support is confirmed live (k16): the session is confined, the
   pressure line reaches the model, heavy commands are refused, and the
   shell Codex runs a command in holds the exact command text that
