@@ -275,11 +275,32 @@ class PluginWiring(unittest.TestCase):
         # Codex asks the user to trust the hooks again whenever hooks.json
         # changes (codex-rs hooks/src/engine/discovery.rs:676-725): k15 added
         # the watcher without touching it. Change it only on purpose, then
-        # update this hash (the file as of k6).
+        # update this hash (the file as of windows-developer k6: the confine
+        # entry gained an empty args, which Codex ignores).
         with open(os.path.join(ROOT, "hooks", "hooks.json"), "rb") as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(),
-                             "d2e0dc4f9bfa7548a4cace9cf90b82ad7c52bcc408bce8e9"
-                             "8314eac3a1ac663b")
+                             "91ddbcc6b5f2fd485279256f7679d317ae6ac7a13075862d"
+                             "2bebb4338a8dcd52")
+
+    def test_every_entry_is_exec_form_with_a_windows_exe(self):
+        # windows-developer k6: Claude Code on Windows starts an exec-form
+        # command without extension as <command>.exe -- winlaunch, which
+        # finds no "# winlaunch: run" line in our scripts and exits 0 with
+        # no output. That is how loadguard stays silent there. Shell form
+        # would need Git Bash or meet PowerShell, so every entry carries
+        # args (empty where the script needs none).
+        for event, groups in self.hooks.items():
+            for group in groups:
+                for hook in group["hooks"]:
+                    with self.subTest(event=event, command=hook["command"]):
+                        self.assertIn("args", hook)
+                        prefix = "${CLAUDE_PLUGIN_ROOT}/hooks/"
+                        self.assertTrue(hook["command"].startswith(prefix))
+                        name = hook["command"][len(prefix):]
+                        self.assertTrue(os.path.isfile(
+                            os.path.join(ROOT, "hooks", name + ".exe")))
+                        with open(os.path.join(ROOT, "hooks", name), "rb") as f:
+                            self.assertNotIn(b"# winlaunch: run", f.read())
 
     def assert_starter(self, hook):
         self.assertEqual(hook["type"], "command")
@@ -336,6 +357,9 @@ class PluginWiring(unittest.TestCase):
         hook = self.session_start_hook("loadguard-confine")
         self.assertIs(hook["async"], True)
         self.assertLessEqual(hook["timeout"], 10)
+        # Exec form with nothing to pass: the data dir comes from
+        # $CLAUDE_PLUGIN_DATA, as under Codex.
+        self.assertEqual(hook["args"], [])
 
 class CodexRuns(unittest.TestCase):
     """Every hooks.json entry, run the way Codex 0.153.4 runs it (k11).
@@ -367,7 +391,7 @@ class CodexRuns(unittest.TestCase):
         "        f.write(str(session_id))\n"
         "    return 'stub'\n")
     # k15: the watcher's start gets confine's status and the data dir, which
-    # the confine entry (no args) reads from $CLAUDE_PLUGIN_DATA.
+    # the confine entry (empty args) reads from $CLAUDE_PLUGIN_DATA.
     STUB_LEARN = (
         "import os\n"
         "def start_watcher(status, data_dir):\n"
