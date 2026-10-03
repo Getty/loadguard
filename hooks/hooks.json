@@ -6,6 +6,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/loadguard-confine",
+            "args": [],
             "async": true,
             "timeout": 10
           },

@@ -866,3 +866,12 @@ Umgesetzt (k8):
   Hook-Fehlermeldung (exit 127).
 - **Der Python-Hook ist gelöscht**: ohne Binary ist Pass-through genau
   `exit 0`, dafür braucht es keinen Interpreter für 83–183 ms.
+- **Windows: still aus** (windows-developer k6). Claude Code startet dort
+  ein Skript ohne Endung nicht (ENOENT); einen Plattform-Schalter für Hooks
+  gibt es nicht. Eine Exec-Form ohne Endung startet auf Windows aber
+  `<command>.exe`. Neben jedem der drei Skripte liegt deshalb eine Kopie von
+  `winlaunch` (`winlaunch/`, reproduzierbar mit zig gebaut, in der CI
+  nachgebaut und verglichen). Sie liest `# winlaunch:`-Zeilen aus dem Skript
+  daneben; loadguards Skripte haben keine, also endet jeder Hook mit exit 0
+  und ohne Ausgabe. Dafür läuft auch `loadguard-confine` in Exec-Form
+  (`args: []`); Codex ignoriert `args` und sieht denselben Befehlstext.

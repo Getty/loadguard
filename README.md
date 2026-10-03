@@ -16,7 +16,8 @@ tells the model why, with the numbers and a lighter alternative. While
 memory stays short, the model hears it with every prompt, before it tries;
 when the host is calm, loadguard adds nothing to the context.
 
-Linux only. The same plugin runs under Codex; see [Codex](#codex).
+Linux only. The same plugin runs under Codex; see [Codex](#codex). On Windows
+it installs and stays silent: every hook ends at once, without a message.
 
 ## The problem this solves
 

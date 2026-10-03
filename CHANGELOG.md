@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-10-03
+
+- Windows: loadguard stays silent instead of failing every hook with
+  `ENOENT`. Each hook script has a small `<name>.exe` next to it, which
+  Claude Code starts on Windows and which exits at once. Linux and macOS
+  start the scripts as before.
+- `hooks.json` changed (the confine entry gained `"args": []`), so Codex asks
+  to trust the hooks once more.
+
 ## 0.2.1 - 2026-09-27
 
 - Codex support is confirmed live (k16): the session is confined, the
