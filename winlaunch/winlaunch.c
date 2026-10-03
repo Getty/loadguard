@@ -18,7 +18,8 @@
  *                             exit a sh starter does before starting Python
  * Words are separated by single spaces; quotes are not interpreted. A
  * placeholder that expands to a path with spaces still stays one argument.
- * Placeholders: {root} is the plugin root, {self} the script itself, {data}
+ * Placeholders: {root} is the plugin root (the directory above the one this
+ * .exe sits in: hooks/ or bin/), {self} the script itself, {data}
  * $CLAUDE_PLUGIN_DATA.
  * <program> "python" picks a Python that really runs (python3.exe,
  * python.exe, py.exe -3 -- the Microsoft Store stubs in WindowsApps are
@@ -183,16 +184,16 @@ int main(void)
 	DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH * 2);
 	if (!n || n >= MAX_PATH * 2 || n < 5) return 0;
 
-	/* self = this file without ".exe"; root = $CLAUDE_PLUGIN_ROOT, else ..\ of us */
+	/* self = this file without ".exe"; root = the directory above ours. Not
+	 * $CLAUDE_PLUGIN_ROOT: a command in bin/ may be run from a hook of
+	 * another plugin, where that names the other plugin. */
 	for (DWORD i = 0; i <= n - 4; i++) self[i] = exe[i];
 	self[n - 4] = 0;
-	if (!GetEnvironmentVariableW(L"CLAUDE_PLUGIN_ROOT", root, MAX_PATH * 2)) {
-		for (DWORD i = 0; i <= n; i++) root[i] = exe[i];
-		for (int up = 0; up < 2; up++) {
-			wchar_t *s = root + wlen(root);
-			while (s > root && *s != L'\\' && *s != L'/') s--;
-			*s = 0;
-		}
+	for (DWORD i = 0; i <= n; i++) root[i] = exe[i];
+	for (int up = 0; up < 2; up++) {
+		wchar_t *s = root + wlen(root);
+		while (s > root && *s != L'\\' && *s != L'/') s--;
+		*s = 0;
 	}
 
 	if (!GetEnvironmentVariableW(L"CLAUDE_PLUGIN_DATA", data, MAX_PATH * 2)) data[0] = 0;

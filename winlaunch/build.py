@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build winlaunch.exe reproducibly.
 
-    python3 build.py OUT.exe [--target x86_64-windows-gnu]
+    python3 build.py OUT.exe [--target x86_64-windows-gnu] [--src mcpoff.c]
 
 Needs the ziglang package (pip install ziglang==0.13.0.post1). zig's linker
 stamps the link time into the PE header; that field is zeroed afterwards so
@@ -20,7 +20,7 @@ def main(argv):
         sys.exit(__doc__)
     out = Path(argv[0])
     target = argv[argv.index("--target") + 1] if "--target" in argv else "x86_64-windows-gnu"
-    src = Path(__file__).with_name("winlaunch.c")
+    src = Path(__file__).with_name(argv[argv.index("--src") + 1] if "--src" in argv else "winlaunch.c")
 
     version = subprocess.run([sys.executable, "-m", "ziglang", "version"],
                              capture_output=True, text=True, check=True).stdout.strip()
