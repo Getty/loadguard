@@ -8,3 +8,6 @@ config.yml
 
 # local build (make)
 build/
+
+# Claude Code worktrees (claude --worktree / isolated agents) -- never commit
+/.claude/worktrees/
