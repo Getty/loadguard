@@ -73,6 +73,21 @@ class Winlaunch(unittest.TestCase):
         self.assertEqual(out["enc"], "utf-8")
         self.assertEqual(out["pp"], str(self.root) + "/lib")
 
+    def test_skip_unless(self):
+        (self.root / "lib" / "say.py").write_text("print('ran')\n", encoding="utf-8")
+        exe = self.hook("skippy",
+                        "# winlaunch: skip Hot unless {data}/pending/*\n"
+                        "# winlaunch: run python {root}/lib/say.py\n")
+        data = self.root / "data"
+        (data / "pending").mkdir(parents=True)
+        env = {"CLAUDE_PLUGIN_DATA": str(data)}
+        self.assertEqual(self.run_hook(exe, ["Hot"], env=env).stdout, b"")
+        self.assertIn(b"ran", self.run_hook(exe, ["Cold"], env=env).stdout)
+        (data / "pending" / "abc").write_text("0\n")
+        self.assertIn(b"ran", self.run_hook(exe, ["Hot"], env=env).stdout)
+        # No data directory at all: the hot path stays quiet.
+        self.assertEqual(self.run_hook(exe, ["Hot"], env={"CLAUDE_PLUGIN_DATA": ""}).stdout, b"")
+
     def test_no_python_is_silent(self):
         exe = self.hook("needs-py", "# winlaunch: run python {root}/lib/x.py\n")
         system = os.environ.get("SystemRoot", r"C:\Windows")

@@ -13,9 +13,13 @@
  * Directives, read from the first 64 lines:
  *   run <program> <args...>   what to start; its own arguments follow these
  *   env <NAME>=<value>        set a variable for it
+ *   skip <arg> unless <glob>  exit 0 at once when our first argument is <arg>
+ *                             and no file matches <glob> -- the cheap early
+ *                             exit a sh starter does before starting Python
  * Words are separated by single spaces; quotes are not interpreted. A
  * placeholder that expands to a path with spaces still stays one argument.
- * Placeholders: {root} is the plugin root, {self} the script itself.
+ * Placeholders: {root} is the plugin root, {self} the script itself, {data}
+ * $CLAUDE_PLUGIN_DATA.
  * <program> "python" picks a Python that really runs (python3.exe,
  * python.exe, py.exe -3 -- the Microsoft Store stubs in WindowsApps are
  * skipped) and sets PYTHONUTF8=1; "node" picks node.exe; anything else is
@@ -34,7 +38,7 @@
 
 #define MAXCMD 32768
 
-static wchar_t root[MAX_PATH * 2], self[MAX_PATH * 2];
+static wchar_t root[MAX_PATH * 2], self[MAX_PATH * 2], data[MAX_PATH * 2];
 
 static size_t wlen(const wchar_t *s) { size_t n = 0; while (s[n]) n++; return n; }
 
@@ -68,6 +72,7 @@ static int expand(const wchar_t *in, wchar_t *out, size_t cap)
 	while (*in) {
 		if (wstarts(in, L"{root}")) { if (!wcat(out, cap, root)) return 0; in += 6; continue; }
 		if (wstarts(in, L"{self}")) { if (!wcat(out, cap, self)) return 0; in += 6; continue; }
+		if (wstarts(in, L"{data}")) { if (!wcat(out, cap, data)) return 0; in += 6; continue; }
 		wchar_t c[2] = { *in++, 0 };
 		if (!wcat(out, cap, c)) return 0;
 	}
@@ -141,6 +146,35 @@ static int read_script(wchar_t *buf, size_t cap)
 	return n > 0;
 }
 
+/* Our own first argument, as Claude Code passed it (one word, maybe quoted). */
+static void first_arg(wchar_t *out, size_t cap)
+{
+	const wchar_t *p = GetCommandLineW();
+	if (*p == L'"') { p++; while (*p && *p != L'"') p++; if (*p) p++; }
+	else { while (*p && *p != L' ' && *p != L'\t') p++; }
+	while (*p == L' ' || *p == L'\t') p++;
+	size_t n = 0;
+	int quoted = *p == L'"';
+	if (quoted) p++;
+	while (*p && n + 1 < cap && (quoted ? *p != L'"' : (*p != L' ' && *p != L'\t'))) out[n++] = *p++;
+	out[n] = 0;
+}
+
+/* Does any file match the wildcard pattern? Names starting with a dot do
+ * not count, as in a sh glob -- and "*" would otherwise find "." and "..". */
+static int any_match(const wchar_t *pattern)
+{
+	WIN32_FIND_DATAW fd;
+	HANDLE h = FindFirstFileW(pattern, &fd);
+	if (h == INVALID_HANDLE_VALUE) return 0;
+	int found = 0;
+	do {
+		if (fd.cFileName[0] != L'.') { found = 1; break; }
+	} while (FindNextFileW(h, &fd));
+	FindClose(h);
+	return found;
+}
+
 int main(void)
 {
 	static wchar_t exe[MAX_PATH * 2], script[16384], cmd[MAXCMD], tmp[MAXCMD];
@@ -161,7 +195,10 @@ int main(void)
 		}
 	}
 
+	if (!GetEnvironmentVariableW(L"CLAUDE_PLUGIN_DATA", data, MAX_PATH * 2)) data[0] = 0;
 	if (!read_script(script, sizeof script / sizeof *script)) return 0;
+	static wchar_t arg1[MAX_PATH];
+	first_arg(arg1, MAX_PATH);
 
 	/* Walk the directives. */
 	const wchar_t *run = NULL;
@@ -175,6 +212,16 @@ int main(void)
 			wchar_t *d = line + 13;
 			if (wstarts(d, L"run ")) {
 				run = d + 4;
+			} else if (wstarts(d, L"skip ")) {
+				/* skip <arg> unless <glob> */
+				wchar_t *a = d + 5, *u = a;
+				while (*u && *u != L' ') u++;
+				if (*u && wstarts(u, L" unless ")) {
+					*u = 0;
+					if (CompareStringOrdinal(a, -1, arg1, -1, FALSE) == CSTR_EQUAL
+					    && (!data[0] || !expand(u + 8, tmp, MAXCMD) || !any_match(tmp)))
+						return 0;
+				}
 			} else if (wstarts(d, L"env ")) {
 				wchar_t *eq = d + 4;
 				while (*eq && *eq != L'=') eq++;
