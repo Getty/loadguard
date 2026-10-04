@@ -1,0 +1,22 @@
+{
+  "sources": {
+    "getty": {
+      "git": "https://github.com/Getty/skills.git",
+      "ref": "main"
+    },
+    "karr": {
+      "git": "https://github.com/Getty/karr.git",
+      "ref": "main"
+    }
+  },
+  "install": {
+    "skills": [
+      "getty-git-commit-style@getty",
+      "kanban-issues-karr-ticket@karr"
+    ]
+  },
+  "targets": [
+    "claude"
+  ],
+  "gitignore": true
+}
