@@ -22,7 +22,7 @@ agent; subagents get their knowledge from the skills in `briefing.skills`.
   | Task | Agent |
   |---|---|
   | Implement / refactor / debug / test | `loadguard-worker` |
-  | Commits, CHANGELOG, card → done, release audit | `loadguard-release-manager` |
+  | Commits, `Changes`, card → done, release audit | `loadguard-release-manager` |
 
   Your lane: plan, cut cards, dispatch, review diffs, run tests, talk to Getty.
 - **You are a `loadguard-*` agent**: the lock does not apply; work your lane.

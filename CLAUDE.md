@@ -13,7 +13,7 @@ Thrash-Reboots von `reuben` (Beweise: `~/load-incidents/`).
 | Aufgabe | Agent |
 |---|---|
 | Hook, CLI, Entscheidungslogik, Tests | `loadguard-worker` |
-| Commits, CHANGELOG, Karte → done, Release-Audit | `loadguard-release-manager` |
+| Commits, `Changes`, Karte → done, Release-Audit | `loadguard-release-manager` |
 
 Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
 `briefing.skills` (`.claude/agents/`); Skill-Quellen unter `.claude/skills/`.
