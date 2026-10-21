@@ -5,6 +5,7 @@ model: inherit
 briefing:
   skills:
     - loadguard-core
+    - loadguard-harness
     - kanban-issues-karr-ticket
 ---
 

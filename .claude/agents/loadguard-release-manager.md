@@ -5,6 +5,7 @@ model: sonnet
 briefing:
   skills:
     - getty-git-commit-style
+    - loadguard-harness
     - kanban-issues-karr-ticket
 ---
 
