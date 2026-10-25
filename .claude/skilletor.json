@@ -13,6 +13,9 @@
     "skills": [
       "getty-git-commit-style@getty",
       "kanban-issues-karr-ticket@karr"
+    ],
+    "bundles": [
+      "getty-house@getty"
     ]
   },
   "targets": [

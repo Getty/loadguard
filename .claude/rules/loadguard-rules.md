@@ -1,54 +1,45 @@
 # loadguard House Rules
 
-Apply to every task in this repository. Loaded automatically for the orchestrating
-agent; subagents get their knowledge from the skills in `briefing.skills`.
+The shared house rules come from skilletor — bundle `getty-house@getty`: engineering
+discipline, the delegation lock, the publish gate, karr coordination. They load as
+`.claude/rules/.local.*.md`; if they are missing, run `skilletor sync` and publish nothing
+until they load. This file adds what is true only here, and wins where it differs.
 
-## Engineering discipline
+## What this repo is
 
-1. **Think before coding** — state assumptions, ask when unsure, stop when confused.
-2. **Simplicity first** — minimum code, nothing speculative; Python stdlib only, C with vendored cJSON only.
-3. **Surgical changes** — touch only what the card needs.
-4. **Goal-driven** — define success criteria, loop until verified.
-5. **Fail loud** — "done" is wrong if anything was skipped; "tests pass" is wrong if
-   any were skipped.
-6. **A red test is a claim before it is a failure** — say what it asserts before
-   changing code to make it green.
+Claude Code plugin that measures and limits the load AI processes put on the host and
+reports it back to the AI so it can steer. Read first: `docs/design.md`. Python stdlib
+only; C with vendored cJSON only.
 
-## Delegation
+## Agent team
 
-- **You can spawn subagents** (orchestrating main agent): do not touch the hook, the
-  CLI or the decision logic yourself — delegate.
+| Task | Agent |
+|---|---|
+| Implement / refactor / debug / test | `loadguard-worker` |
+| Commits, `Changes`, card → done, release audit | `loadguard-release-manager` |
+| Read-only research, audit, gap analysis | `loadguard-worker` ("read-only, change nothing") |
 
-  | Task | Agent |
-  |---|---|
-  | Implement / refactor / debug / test | `loadguard-worker` |
-  | Commits, `Changes`, card → done, release audit | `loadguard-release-manager` |
+Behavior-relevant = the hook, the CLI, the decision logic and their tests. Main agent's
+lane here: plan, cut cards, dispatch, review diffs, run tests, talk to Getty.
 
-  Your lane: plan, cut cards, dispatch, review diffs, run tests, talk to Getty.
-- **You are a `loadguard-*` agent**: the lock does not apply; work your lane.
+## Release
 
-**Only `loadguard-release-manager` commits.** Workers leave a commit-ready tree and a
-report. Main agent: after a worker hands off, dispatch the release manager.
-
-## Coordination — karr
-
-This repo has its own karr board. You pick, claim, create and route cards; the worker
-only works the card it was handed and ends at `review`; the release manager moves it
-to `done` after the commit. Serialize board mutations when fanning out.
-
-## Never without permission
-
-`git push`, tagging, marketplace publication (`~/dev/marketplace`), and installing
-the plugin into Getty's live `~/.claude` — each needs Getty's explicit go-ahead.
+Beyond the shared publish gate: marketplace publication (`~/dev/marketplace`) and
+installing the plugin into Getty's live `~/.claude` each need Getty's explicit go-ahead.
 Installing a half-built PreToolUse hook on Bash can wedge every session on the host.
+
+## Deviations from the house rules
+
+- **At most one subagent at a time** — never spawn owning agents in parallel, even for a
+  task spanning several lanes. Parallel workers on this box are part of the problem this
+  repo exists to solve.
 
 ## Hazards — this host is the patient
 
-- **reuben has 4 cores, ~8 GB RAM, 3.2 GB zram + 8 GB swapfile** and has been power-cycled repeatedly
-  under memory thrash (evidence: `~/load-incidents/`). Never produce real memory or
-  CPU pressure to test loadguard — use fixtures from the incident snapshots.
-- **At most one subagent at a time** here. Parallel workers on this box are part of
-  the problem this repo exists to solve.
-- **A PreToolUse hook on Bash runs before every shell call of every session.** A bug
-  that exits non-zero or hangs blocks all agents on the host. Fail open, set a hook
-  timeout, and test the hook binary against recorded payloads before wiring it.
+- **reuben has 4 cores, ~8 GB RAM, 3.2 GB zram + 8 GB swapfile** and has been
+  power-cycled repeatedly under memory thrash (evidence: `~/load-incidents/`). Never
+  produce real memory or CPU pressure to test loadguard — use fixtures from the incident
+  snapshots.
+- **A PreToolUse hook on Bash runs before every shell call of every session.** A bug that
+  exits non-zero or hangs blocks all agents on the host. Fail open, set a hook timeout,
+  and test the hook binary against recorded payloads before wiring it.

@@ -5,7 +5,8 @@ der KI zurückmeldet, damit sie gegensteuern kann. Entstanden aus den
 Thrash-Reboots von `reuben` (Beweise: `~/load-incidents/`).
 
 - **Design, Stufen, offene Fragen:** [`docs/design.md`](docs/design.md) — zuerst lesen.
-- **Regeln + Delegation:** `.claude/rules/loadguard-rules.md` (auto-geladen).
+- **Regeln + Delegation:** gemeinsame House-Rules über das skilletor-Bundle
+  `getty-house@getty`; Lanes und Hazards in `.claude/rules/loadguard-rules.md` (auto-geladen).
 - **Board:** `karr list --compact` — die Karten folgen den Stufen aus dem Design.
 
 ## Delegation
