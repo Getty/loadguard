@@ -1,215 +1,215 @@
 # loadguard — Design
 
-Claude-Code-Plugin (Getty-Marketplace), das die Last, die KI-Prozesse auf dem Host
-erzeugen, **misst, begrenzt und an die KI zurückmeldet**, damit sie selbst
-gegensteuern kann. Ziel-Host zuerst: `reuben` (4 Cores, ~8 GB RAM; Swap = 3,2 GB zram0 + 8 GB `/swapfile`).
+Claude Code plugin (Getty marketplace) that **measures and limits the load AI
+processes put on the host, and reports it back to the AI**, so it can steer against
+it itself. Target host first: `reuben` (4 cores, ~8 GB RAM; swap = 3.2 GB zram0 + 8 GB `/swapfile`).
 
-## Problem, belegt
+## The problem, with evidence
 
-`~/load-incidents/*.txt` (54 Snapshots von `~/bin/load-watchdog.sh`, ausgelöst ab
-loadavg ≥ 20). Muster vor den Power-Knopf-Reboots:
+`~/load-incidents/*.txt` (54 snapshots from `~/bin/load-watchdog.sh`, triggered at
+loadavg ≥ 20). The pattern before the power-button reboots:
 
-- RAM voll, **Swap (zram + Swapfile) 100 % voll**, Memory-/IO-PSI `full` > 50 %, Load bis 85.
-- 5–7 parallele `claude`-Sessions, jede im D-State (`folio_wait_bit_common`).
-- **Ein einzelner Befehl frisst alles**: `20260917-175030.txt` zeigt ein
-  `perl -Ilib -MJSON::Schema::Modern -e …` mit **3,8 GB RSS (48 % RAM)** — ein
-  harmlos aussehender Einzeiler, kein `prove`, kein `make`.
-- Headless-Agenten in podman (`perlbench`) laufen `prove -lr t/` in Dauerschleife.
+- RAM full, **swap (zram + swapfile) 100 % full**, memory/IO PSI `full` > 50 %, load up to 85.
+- 5–7 parallel `claude` sessions, each in D state (`folio_wait_bit_common`).
+- **A single command eats everything**: `20260917-175030.txt` shows a
+  `perl -Ilib -MJSON::Schema::Modern -e …` with **3.8 GB RSS (48 % RAM)** — a
+  harmless-looking one-liner, no `prove`, no `make`.
+- Headless agents in podman (`perlbench`) run `prove -lr t/` in an endless loop.
 
-Die zentrale Lehre aus dem 3,8-GB-Einzeiler: **Muster-Erkennung „schwerer Befehle"
-allein reicht nicht.** Der Schutz muss für *jeden* KI-Bash-Befehl gelten; das Muster
-entscheidet nur über die Strenge.
+The central lesson from the 3.8 GB one-liner: **pattern matching on "heavy commands"
+alone is not enough.** The protection has to apply to *every* AI Bash command; the
+pattern only decides how strict it is.
 
-## Mechanismus
+## Mechanism
 
-Ein `PreToolUse`-Hook mit Matcher `Bash`. Er bekommt den Befehl als JSON auf stdin
-und darf ihn (a) durchlassen, (b) umschreiben (`updatedInput`) oder (c) verweigern
-(`permissionDecision: deny` + Grund — dieser Grund landet bei der KI und ist der
-Kanal, über den sie gegensteuert).
+A `PreToolUse` hook with matcher `Bash`. It receives the command as JSON on stdin
+and may (a) let it through, (b) rewrite it (`updatedInput`) or (c) refuse it
+(`permissionDecision: deny` + reason — that reason reaches the AI and is the
+channel through which it steers against the load).
 
-**`updatedInput` ersetzt `tool_input` vollständig** (festgenagelt 2026-09-26, k7,
-Claude Code 2.1.283, `t/fixtures/updated-input/`): Felder, die der Hook weglässt
-(`description`, `timeout`), fehlen danach im ausgeführten `tool_input`. Der Hook muss
-also das eingehende `tool_input` komplett kopieren und nur `command` tauschen. Das
-eingehende `tool_input` enthält nur, was die KI gesetzt hat — keine Defaults.
-`updatedInput` wirkt ohne `permissionDecision`; loadguard sendet beim Umschreiben kein
-`allow`.
+**`updatedInput` replaces `tool_input` completely** (pinned down 2026-09-26, k7,
+Claude Code 2.1.283, `t/fixtures/updated-input/`): fields the hook leaves out
+(`description`, `timeout`) are then missing from the executed `tool_input`. So the hook
+has to copy the incoming `tool_input` completely and swap only `command`. The
+incoming `tool_input` contains only what the AI set — no defaults.
+`updatedInput` works without `permissionDecision`; loadguard sends no `allow` when it
+rewrites.
 
-**Freigaben werden am umgeschriebenen Befehl geprüft** (k3, live, korrigiert den
-k7-Schluss): Mit nur dem Original in `--allowedTools` wurde der eingewickelte Befehl
-verweigert, mit nur den eingewickelten Strings lief alles. k7 sah das Gegenteil nur,
-weil der Rewrite dort `echo …` war, das Claude Code als read-only ohnehin freigibt.
-Ein Rewrite bricht also die Freigaben des Users — Stufe 1 per `updatedInput` ist in
-dieser Form nicht tragfähig (Optionen: Karte k3).
+**Permissions are checked against the rewritten command** (k3, live, corrects the
+k7 conclusion): with only the original in `--allowedTools` the wrapped command was
+refused, with only the wrapped strings everything ran. k7 saw the opposite only
+because its rewrite was `echo …`, which Claude Code allows as read-only anyway.
+So a rewrite breaks the user's permissions — stage 1 via `updatedInput` is not
+viable in this form (options: card k3).
 
-### Stufe 1 — Einsperren: die ganze Session (entschieden 2026-09-26)
+### Stage 1 — Confine: the whole session (decided 2026-09-26)
 
-Ursprünglich geplant war, jeden Befehl per `updatedInput` in
-`systemd-run --user --scope … -- bash -c '<original>'` zu wickeln. k3 hat live gezeigt,
-dass das nicht tragfähig ist: Freigaben werden am umgeschriebenen Befehl geprüft
-(jede `Bash(git:*)`-Regel bricht), und Claude Code führt jeden Aufruf als
-`bash -c 'source <snapshot> && eval <cmd> && pwd -P >| <cwd-datei>'` aus — eine
-Kind-Shell im Scope verliert `cd` und die Snapshot-Funktionen.
+The original plan was to wrap every command via `updatedInput` in
+`systemd-run --user --scope … -- bash -c '<original>'`. k3 showed live that this is
+not viable: permissions are checked against the rewritten command (every
+`Bash(git:*)` rule breaks), and Claude Code runs every call as
+`bash -c 'source <snapshot> && eval <cmd> && pwd -P >| <cwd-file>'` — a child shell
+inside the scope loses `cd` and the snapshot functions.
 
-Stattdessen: **Der SessionStart-Hook schiebt den `claude`-Prozess selbst in einen
-transienten systemd-User-Scope mit Limits** (D-Bus `StartTransientUnit` mit `PIDs=`
-nur für `claude`; was `claude` vorher gestartet hat, folgt per
-`AttachProcessesToUnit`, dafür `Delegate=yes` — k12: eine verschwundene PID in `PIDs=`
-lässt die Unit asynchron scheitern, obwohl der Aufruf gelingt).
-Alles, was die Session startet — Bash-Befehle, Subagenten, MCP-Server — erbt den
-Scope. Befehle werden nie umgeschrieben: Freigaben, `cd`, Funktionen, Exit-Codes und
-`run_in_background` bleiben unberührt; pro Bash-Aufruf kostet Stufe 1 nichts.
+Instead: **the SessionStart hook moves the `claude` process itself into a transient
+systemd user scope with limits** (D-Bus `StartTransientUnit` with `PIDs=` only for
+`claude`; whatever `claude` started before follows via `AttachProcessesToUnit`, for
+which `Delegate=yes` — k12: a vanished PID in `PIDs=` makes the unit fail
+asynchronously although the call succeeds).
+Everything the session starts — Bash commands, subagents, MCP servers — inherits the
+scope. Commands are never rewritten: permissions, `cd`, functions, exit codes and
+`run_in_background` stay untouched; stage 1 costs nothing per Bash call.
 
-Auf reuben verifiziert: Memory-Controller ist an `user@1000.service` delegiert
-(`cpu memory pids`, nicht `io`), `memory.max` greift (OOM im Scope → rc 137), eine
-fremde PID lässt sich aus der logind-`session-N.scope` in einen eigenen Scope
-verschieben (asynchron, ~1–21 ms).
+Verified on reuben: the memory controller is delegated to `user@1000.service`
+(`cpu memory pids`, not `io`), `memory.max` takes effect (OOM in the scope → rc 137), a
+foreign PID can be moved from the logind `session-N.scope` into a scope of its own
+(asynchronously, ~1–21 ms).
 
-Abwägungen, bewusst in Kauf genommen:
-- Das Limit gilt pro Session, nicht pro Befehl; `claude` selbst (~300 MB) zählt mit.
-- Bei `MemoryMax` wählt der Kernel im Scope den größten Prozess — in der Regel den
-  Ausreißer, nicht `claude`.
-- `claude` verlässt die logind-Session-Scope.
-- Global über alle Sessions begrenzt erst Stufe 2/3.
+Trade-offs, accepted deliberately:
+- The limit applies per session, not per command; `claude` itself (~300 MB) counts too.
+- At `MemoryMax` the kernel picks the largest process in the scope — usually the
+  outlier, not `claude`.
+- `claude` leaves the logind session scope.
+- Only stage 2/3 limit globally across all sessions.
 
-Fallback ohne systemd/Delegation (macOS, Container): Stufe 1 aus, fail-open.
-Ebenso ohne Linger (`/var/lib/systemd/linger/$USER`): sonst stürbe ein `claude` in
-`screen`/`tmux` beim letzten Logout mit dem User-Manager. Ausschalter:
-`LOADGUARD_CONFINE=0`. Verschachtelte `claude -p` bleiben bewusst im Scope der
-Eltern-Session und teilen deren Limit (entschieden 2026-09-26).
+Fallback without systemd/delegation (macOS, containers): stage 1 off, fail-open.
+Likewise without linger (`/var/lib/systemd/linger/$USER`): otherwise a `claude` in
+`screen`/`tmux` would die with the user manager at the last logout. Off switch:
+`LOADGUARD_CONFINE=0`. Nested `claude -p` deliberately stay in the scope of the
+parent session and share its limit (decided 2026-09-26).
 
-Umgesetzt (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
+Implemented (k3, `hooks/loadguard-confine`, `lib/loadguard/confine.py`):
 
-- **Eigener async SessionStart-Hook**, Python. Einmal pro Session ist ein
-  Subprozess billig: `busctl --user call … StartTransientUnit` (kommt mit systemd;
-  kein nachgebautes D-Bus-Protokoll). Live: Call 10 ms, Umzug nach ~30 ms
-  bestätigt (`/proc/<pid>/cgroup`, max. 1 s gepollt). Async genügt: Prozesse, die
-  claude vor dem Attach gestartet hat (MCP-Server, ein früher Befehl), werden als
-  Nachkommen mitverschoben; in beiden Live-Sessions war der Hook vor dem ersten
-  Bash fertig.
-- **Welcher Prozess:** der nächste Vorfahr des Hooks mit `comm` oder `argv[0]`
-  `claude` (höchstens 8 Ebenen; seit k11 auch `codex`), aus `/proc` gelesen.
-- **Eine Regel für Idempotenz und Verschachtelung:** Liegt dieser claude schon in
-  irgendeinem `loadguard-*.scope`, passiert nichts. resume/clear/compact sind damit
-  No-ops, und ein `claude -p` aus einer eingesperrten Session bleibt im Scope der
-  Eltern — herausholen hieße, dem Limit zu entkommen.
+- **A separate async SessionStart hook**, Python. Once per session a subprocess is
+  cheap: `busctl --user call … StartTransientUnit` (ships with systemd; no
+  re-implemented D-Bus protocol). Live: call 10 ms, move confirmed after ~30 ms
+  (`/proc/<pid>/cgroup`, polled for at most 1 s). Async is enough: processes
+  claude started before the attach (MCP servers, an early command) are moved along as
+  descendants; in both live sessions the hook was done before the first
+  Bash.
+- **Which process:** the hook's nearest ancestor with `comm` or `argv[0]`
+  `claude` (at most 8 levels; since k11 also `codex`), read from `/proc`.
+- **One rule for idempotence and nesting:** if this claude already sits in
+  any `loadguard-*.scope`, nothing happens. resume/clear/compact are no-ops that
+  way, and a `claude -p` from a confined session stays in the parent's scope —
+  taking it out would mean escaping the limit.
 - **Name `loadguard-<session_id[:8]>-<pid>.scope`** in **`app-loadguard.slice`**:
-  `app.slice` ist der Ort für Anwendungen im User-Manager; die eigene Slice gibt
-  Stufe 2/3 einen Knoten für ein gemeinsames Limit aller Sessions. Die PID macht
-  den Namen eindeutig, auch wenn zwei Prozesse dieselbe Session fortsetzen.
-- **`OOMPolicy=continue` ist Pflicht:** Default ist `stop` — ein OOM-Kill des
-  Ausreißers würde den ganzen Scope und damit claude beenden. `CollectMode=
-  inactive-or-failed`: der Scope verschwindet mit dem letzten Prozess.
-- **Limits** in % von MemTotal, per Env: `LOADGUARD_MEMORY_HIGH` 30,
+  `app.slice` is the place for applications in the user manager; the slice of its own
+  gives stage 2/3 a node for a shared limit across all sessions. The PID makes
+  the name unique, even when two processes resume the same session.
+- **`OOMPolicy=continue` is mandatory:** the default is `stop` — an OOM kill of the
+  outlier would end the whole scope and with it claude. `CollectMode=
+  inactive-or-failed`: the scope disappears with its last process.
+- **Limits** in % of MemTotal, via env: `LOADGUARD_MEMORY_HIGH` 30,
   `LOADGUARD_MEMORY_MAX` 40, `LOADGUARD_MEMORY_SWAP_MAX` 10, `LOADGUARD_CPU_WEIGHT`
-  50 (systemd-Default 100). Auf reuben: High 2,3 GiB, Max 3,1 GiB, Swap 0,8 GiB.
-  Der 3,8-GB-Perl-Einzeiler (20260917-175030) passt samt claude nicht hinein
-  (Max + Swap < 3,8 GB + 0,3 GB) und wird im Scope OOM-gekillt; ab 2,3 GiB wird
-  die Session gebremst, ein normaler Build bleibt darunter. `IOWeight` fehlt: `io`
-  ist nicht delegiert.
-- **Delegation** einmal pro Boot: `memory` in `user@UID.service/cgroup.controllers`,
-  gecacht als `<boot_id> yes|no` in `$XDG_RUNTIME_DIR/loadguard/delegation`.
-- **Bekannt:** cgroup v2 zieht Speicherladungen beim Umzug nicht mit — was claude
-  vor dem Attach allokiert hat, bleibt der logind-Scope angerechnet. Ohne Linger
-  endet `user@UID.service` mit der letzten Login-Session und nimmt die Scopes mit
+  50 (systemd default 100). On reuben: high 2.3 GiB, max 3.1 GiB, swap 0.8 GiB.
+  The 3.8 GB Perl one-liner (20260917-175030) does not fit in together with claude
+  (max + swap < 3.8 GB + 0.3 GB) and is OOM-killed inside the scope; from 2.3 GiB on
+  the session is throttled, a normal build stays below that. `IOWeight` is missing: `io`
+  is not delegated.
+- **Delegation** once per boot: `memory` in `user@UID.service/cgroup.controllers`,
+  cached as `<boot_id> yes|no` in `$XDG_RUNTIME_DIR/loadguard/delegation`.
+- **Known:** cgroup v2 does not move memory charges along on a move — what claude
+  allocated before the attach stays charged to the logind scope. Without linger
+  `user@UID.service` ends with the last login session and takes the scopes with it
   (reuben: `Linger=yes`).
 
-### Stufe 2 — Global begrenzen (schwere Befehle)
+### Stage 2 — Limit globally (heavy commands)
 
-Über **alle** Claude-Sessions des Users hinweg laufen höchstens N schwere Befehle
-gleichzeitig (Default: `max(1, nproc/2)`). **Gezählt per `/proc`-Scan** (entschieden
-2026-09-26): Der PreToolUse-Hook zählt laufende schwere Prozesse unter
-`app-loadguard.slice`. `flock`-Slots gehen nicht, weil der Hook endet, bevor der Befehl
-startet, und Befehle nicht umgeschrieben werden (k3). Keine Locks, nichts bleibt
-hängen; akzeptiertes Rennen: zwei Sessions, die im selben Moment starten, sehen beide
-einen freien Slot. Schwer = Muster (`prove`, `dzil test|build|release`,
+Across **all** of the user's Claude sessions at most N heavy commands run
+at the same time (default: `max(1, nproc/2)`). **Counted by a `/proc` scan** (decided
+2026-09-26): the PreToolUse hook counts running heavy processes under
+`app-loadguard.slice`. `flock` slots don't work, because the hook ends before the command
+starts, and commands are not rewritten (k3). No locks, nothing can get
+stuck; accepted race: two sessions starting at the same moment both see
+a free slot. Heavy = pattern (`prove`, `dzil test|build|release`,
 `make test`, `cpanm`, `docker|podman build|run`, `cargo build|test`, `npm test`,
-`perlbench`, `claude --bg`, `claude -p`, seit k11 `codex exec`, seit k14
-`codex review`) **plus** alles,
-was nachträglich im Scope viel Speicher gezogen hat (Lernliste, unten).
+`perlbench`, `claude --bg`, `claude -p`, since k11 `codex exec`, since k14
+`codex review`) **plus** everything
+that later pulled a lot of memory inside the scope (learned list, below).
 
-Kein freier Slot → Stufe 3 statt stillem Warten (die KI soll wissen, dass sie wartet).
+No free slot → stage 3 instead of silent waiting (the AI should know it is waiting).
 
-### Speichersignal (entschieden 2026-09-26)
+### Memory signal (decided 2026-09-26)
 
-Aus den 54 Snapshots (k2): **memory PSI `full avg10`** trennt scharf — < 2 % in der
-CPU-lastigen Phase, > 45 % in jedem Thrash-Snapshot, nichts dazwischen. `avg10`, nicht
-`avg60/300`: der Thrash kommt schlagartig (175030: avg10 63 %, avg300 20 %).
-Nebensignal: **Swap gesamt** (`SwapFree/SwapTotal` aus `/proc/meminfo`) — 100 % belegt
-in jedem Thrash-Snapshot, nie in der ruhigen Phase. **zram-Füllgrad allein ist kein
-Signal**: zram0 steht schon im Ruhezustand bei ~98 %, das Swapfile nimmt den Überlauf;
-er erscheint nur als Info in der Begründung. `MemAvailable` ist schwach (1,1–1,7 GB
-auch im Thrash). `cpu some` ist auf reuben routinemäßig hoch und kein Notfall.
+From the 54 snapshots (k2): **memory PSI `full avg10`** separates sharply — < 2 % in the
+CPU-heavy phase, > 45 % in every thrash snapshot, nothing in between. `avg10`, not
+`avg60/300`: the thrash arrives abruptly (175030: avg10 63 %, avg300 20 %).
+Secondary signal: **total swap** (`SwapFree/SwapTotal` from `/proc/meminfo`) — 100 % used
+in every thrash snapshot, never in the quiet phase. **zram fill level alone is no
+signal**: zram0 already sits at ~98 % at rest, the swapfile takes the overflow;
+it only appears as information in the reason. `MemAvailable` is weak (1.1–1.7 GB
+even during thrash). `cpu some` is routinely high on reuben and no emergency.
 
-### Stufe 3 — Ablehnen mit Begründung
+### Stage 3 — Refuse with a reason
 
-Bei Druck oberhalb der Schwelle (Speichersignal oben) oder ohne freien Slot wird ein
-schwerer Befehl verweigert. Die Begründung ist das Produkt — kurz, messbar, mit
-konkreter Alternative:
+Under pressure above the threshold (memory signal above) or without a free slot, a
+heavy command is refused. The reason is the product — short, measurable, with a
+concrete alternative:
 
 > loadguard: memory pressure full=38% (limit 20%), swap 97%, 2/2 heavy slots busy
-> (prove -lr t/ in ~/dev/sunriser, perlbench). Warte, oder teste gezielt
-> (`prove -l t/foo.t` statt `-r`). Keine neuen `claude --bg` starten.
+> (prove -lr t/ in ~/dev/sunriser, perlbench). Wait, or test selectively
+> (`prove -l t/foo.t` instead of `-r`). Don't start new `claude --bg`.
 
-Leichte Befehle (`git status`, `karr show`, `ls`, `cat` …) werden nie verweigert —
-sonst kann die KI nicht einmal nachsehen, was los ist.
+Light commands (`git status`, `karr show`, `ls`, `cat` …) are never refused —
+otherwise the AI could not even look at what is going on.
 
-### Umgesetzt (k4): Stufe 2 + 3
+### Implemented (k4): stage 2 + 3
 
-`src/loadguard-hook.c`, Tests `t/test_throttle.py`.
+`src/loadguard-hook.c`, tests `t/test_throttle.py`.
 
-- **Eine Regel, im C-Binary:** eingehender Befehl schwer **und** (Speicherdruck
-  **oder** alle Slots belegt) → Deny-JSON auf stdout, exit 0. Sonst keine Ausgabe,
-  exit 0, wie bisher. Ein leichter Befehl löst keinen einzigen Lesezugriff aus
-  (nur stdin); Test: `/proc/pressure/memory` als FIFO blockiert ihn nicht.
-- **Schwellwerte**, per Env, ganze Zahlen, `%` erlaubt, ungültig oder außerhalb
-  1–100 (Slots 1–4096) → Default:
+- **One rule, in the C binary:** incoming command heavy **and** (memory pressure
+  **or** all slots taken) → deny JSON on stdout, exit 0. Otherwise no output,
+  exit 0, as before. A light command triggers not a single read
+  (stdin only); test: `/proc/pressure/memory` as a FIFO does not block it.
+- **Thresholds**, via env, integers, `%` allowed, invalid or outside
+  1–100 (slots 1–4096) → default:
   `LOADGUARD_PSI_FULL` **10** (memory `full avg10` in %),
-  `LOADGUARD_SWAP_USED` **90** (Swap gesamt belegt in %),
-  `LOADGUARD_HEAVY_SLOTS` **`max(1, nproc/2)`** (CPUs der Affinität wie `nproc`;
-  reuben: 2). `LOADGUARD_THROTTLE=0` — nur genau `0` — schaltet auf reinen
-  Pass-through.
-- **Herleitung** aus den 54 Snapshots (Parser k2; Test `Calibration` baut jeden als
-  `/proc`-Baum nach und prüft die Entscheidung des Binarys):
-  ruhig 18× — full avg10 0,00–2,03 %, Swap 50,6–68,3 %;
-  Thrash 36× — full avg10 45,47–84,51 %, Swap 91,9–100 %. Ausnahmen beim Swap:
-  20260816-204258 (damals noch kein Swap) und 20260917-183232 (direkt nach einem
-  Kill: 20 % belegt, 5 GB frei, PSI noch 62,9).
-  PSI 10 liegt nahe dem geometrischen Mittel der Lücke (√(2,03 · 45,47) ≈ 9,6):
-  fünfmal über dem ruhigen Höchstwert, 4,5-mal unter dem kleinsten Thrash. Swap 90
-  liegt zwischen 68,3 und 91,9. Verknüpft mit **ODER**: PSI allein verweigert schon
-  jeden Thrash-Snapshot, Swap allein 34 von 36; kein ruhiger Snapshot erreicht eine
-  der Schwellen. Swap ≥ 90 % bei niedrigem PSI heißt: nichts mehr auszulagern, der
-  nächste große Befehl verdrängt Dateiseiten — der Weg in den Thrash, bevor PSI ihn
-  zeigt. zram erscheint nur in der Begründung. Live reuben (2026-09-26): full
-  0,01 %, Swap 51 %, zram 98 %, 297 Prozesse → nichts verweigert.
-- **Unter Druck kein Prozess-Scan.** `/proc/<pid>/cmdline` liest die
-  Argumentseiten des fremden Prozesses — im Thrash ausgelagert, der Leser wartet auf
-  Swap-IO. Ein Hook-Timeout blockiert den Befehl laut Docs **nicht**: Ein langsamer
-  Scan ließe genau den schweren Befehl durch. Der Druck-Grund nennt deshalb nur die
-  Messwerte, keine Slot-Halter. Test: eine cmdline als FIFO würde jeden Leser
-  blockieren, die Druck-Entscheidung kommt trotzdem sofort.
-- **Slot-Scan** (nur ohne Druck): ein Durchlauf über `/proc`; `cgroup` enthält
-  `/app-loadguard.slice/` → `stat` (ppid hinter der letzten `)` — comm kann
-  Leerzeichen und Klammern enthalten, npm: `npm exec claude`) und `cmdline`.
-  Beurteilt wird argv, nicht Text: Basename von argv[0]; bei Interpretern (`perl`,
-  `python3`, `node`, `sh`, `bash` …) das Skript — der Kernel startet prove als
-  `/usr/bin/perl /usr/bin/prove -lr t/`. Inline-Code (`-c`, `-e`, `-E`) ist kein
-  Skript: Der Claude-Code-Wrapper `bash -c '… eval …'` zählt nie, auch wenn sein
-  Format sich ändert. Ein Prozesstitel (npm schreibt `npm test`, mit NULs
-  aufgefüllt) wird an Leerzeichen getrennt. Es zählt nur der **oberste** schwere
-  Prozess einer Kette innerhalb der Slice: prove mit perl-Kindern, rekursives
-  `make test`, `npm test` → prove sind je ein Slot. `claude -p`/`--bg` halten
-  keinen Slot; was sie starten, zählt einzeln.
-- **Schwer (eingehend):** der String wird in einfache Befehle zerlegt (`;` `&` `|`
-  `(` `)` `` ` `` Zeilenumbruch) unter Beachtung von Quotes, Backslashes,
-  Kommentaren, Umleitungen und Heredoc-Rümpfen. Vor dem Befehlswort übersprungen:
+  `LOADGUARD_SWAP_USED` **90** (total swap used in %),
+  `LOADGUARD_HEAVY_SLOTS` **`max(1, nproc/2)`** (CPUs of the affinity, like `nproc`;
+  reuben: 2). `LOADGUARD_THROTTLE=0` — exactly `0` only — switches to pure
+  pass-through.
+- **Derivation** from the 54 snapshots (parser k2; test `Calibration` rebuilds each as a
+  `/proc` tree and checks the binary's decision):
+  quiet 18× — full avg10 0.00–2.03 %, swap 50.6–68.3 %;
+  thrash 36× — full avg10 45.47–84.51 %, swap 91.9–100 %. Exceptions on swap:
+  20260816-204258 (no swap at the time) and 20260917-183232 (right after a
+  kill: 20 % used, 5 GB free, PSI still 62.9).
+  PSI 10 lies near the geometric mean of the gap (√(2.03 · 45.47) ≈ 9.6):
+  five times above the quiet maximum, 4.5 times below the smallest thrash. Swap 90
+  lies between 68.3 and 91.9. Combined with **OR**: PSI alone already refuses
+  every thrash snapshot, swap alone 34 of 36; no quiet snapshot reaches either
+  threshold. Swap ≥ 90 % with low PSI means: nothing left to swap out, the
+  next large command evicts file pages — the road into thrash before PSI shows
+  it. zram appears only in the reason. Live reuben (2026-09-26): full
+  0.01 %, swap 51 %, zram 98 %, 297 processes → nothing refused.
+- **No process scan under pressure.** `/proc/<pid>/cmdline` reads the
+  argument pages of the foreign process — swapped out during thrash, the reader waits for
+  swap IO. A hook timeout does **not** block the command according to the docs: a slow
+  scan would let exactly the heavy command through. The pressure reason therefore names only the
+  measurements, no slot holders. Test: a cmdline as a FIFO would block every reader,
+  the pressure decision still comes immediately.
+- **Slot scan** (only without pressure): one pass over `/proc`; `cgroup` contains
+  `/app-loadguard.slice/` → `stat` (ppid after the last `)` — comm can contain
+  spaces and parentheses, npm: `npm exec claude`) and `cmdline`.
+  argv is judged, not text: basename of argv[0]; for interpreters (`perl`,
+  `python3`, `node`, `sh`, `bash` …) the script — the kernel starts prove as
+  `/usr/bin/perl /usr/bin/prove -lr t/`. Inline code (`-c`, `-e`, `-E`) is no
+  script: the Claude Code wrapper `bash -c '… eval …'` never counts, even if its
+  format changes. A process title (npm writes `npm test`, padded with
+  NULs) is split at spaces. Only the **topmost** heavy
+  process of a chain inside the slice counts: prove with perl children, recursive
+  `make test`, `npm test` → prove are one slot each. `claude -p`/`--bg` hold
+  no slot; what they start counts individually.
+- **Heavy (incoming):** the string is split into simple commands (`;` `&` `|`
+  `(` `)` `` ` `` newline), respecting quotes, backslashes,
+  comments, redirections and heredoc bodies. Skipped before the command word:
   `VAR=x`, `nice` `ionice` `nohup` `timeout` `env` `stdbuf` `setsid` `xargs`
-  `time` `exec` samt Optionen und Zahlen, `if` `then` `do` `!` `{` … Muster wie
-  oben, dazu `claude --print` (= `-p`). Kein Shell-Parser: Unklares fällt auf
-  leicht (`bash -c 'prove …'`, `sudo prove`, `find -exec prove`, mehr als 32
-  Wörter vor `test`) — die Session-Grenze aus Stufe 1 gilt trotzdem.
-- **Begründung** englisch, zwei Zeilen — Zahlen, dann Rat:
+  `time` `exec` with their options and numbers, `if` `then` `do` `!` `{` … Patterns as
+  above, plus `claude --print` (= `-p`). No shell parser: anything unclear falls to
+  light (`bash -c 'prove …'`, `sudo prove`, `find -exec prove`, more than 32
+  words before `test`) — the session limit from stage 1 still applies.
+- **Reason** in English, two lines — numbers, then advice:
 
   > loadguard: heavy command refused (dzil test): 2/2 heavy slots busy (prove -lr
   > t/ in ~/dev/sunriser; make test in ~/dev/p5-foo), memory pressure full=0.0%
@@ -217,661 +217,660 @@ sonst kann die KI nicht einmal nachsehen, was los ist.
   > Wait for one to finish, then retry; light commands (git status, ls, cat) still
   > run. When you retry, run a single test file instead of the whole suite.
 
-  Unter Druck: `…: memory pressure full=59.9% (limit 10%), swap 100% used (limit
+  Under pressure: `…: memory pressure full=59.9% (limit 10%), swap 100% used (limit
   90%).` / `Wait and retry later; light commands (git status, ls, cat) still
-  run.` Rat je Muster nur bei vollen Slots, und zwar für den nächsten Versuch —
-  auch ein kleiner Lauf ist schwer und braucht einen Slot: prove → `When you
-  retry, run fewer tests: prove -l t/foo.t instead of -r`; Testsuite → eine
-  Testdatei. `claude -p`/`--bg` → keine neuen Sessions, in beiden Fällen.
-  **Unter Druck kein Testlauf als Rat** (korrigiert in k6, k4 war
-  unveröffentlicht): Jeder Lauf zieht Speicher, ein einzelnes perl kann die
-  Maschine nehmen (der 3,8-GB-Einzeiler, 20260917-175030), und `prove -l
-  t/foo.t` würde unter Druck ebenso verweigert. Einen Befehl zu nennen, den der
-  Klassifizierer durchlässt (`perl -Ilib t/foo.t`), hieße, der KI den Weg um
-  den eigenen Wächter zu zeigen. Also: warten, leichte Befehle gehen.
-  Höchstens drei Halter, dann `+N more`; Pfade mit `~`, Steuerzeichen und
-  ungültiges UTF-8 als `?`.
-- **Kosten** (reuben, 297 Prozesse, je 300 Läufe inkl. Prozessstart, `nice`):
-  leicht 0,53 ms Median (`/bin/true`: 0,50), schwer und ruhig mit vollem Scan
-  3,64 ms (p90 4,44), schwer unter Druck 0,62 ms. Ziel < 30 ms.
-- **Fail-open:** keine PSI-Datei, kein Swap, unlesbares `/proc` → dieses Signal
-  meldet keinen Druck; ein Prozess, der zwischen `readdir` und dem Lesen
-  verschwindet, zählt nicht. Nie exit 2, SIGPIPE ignoriert. Ausgabe ohne
-  abschließenden Zeilenumbruch — die Form, die k7 live erprobt hat.
-- **Testbarkeit:** die Wurzel für `/proc` und `/sys` gibt es nur im Testtreiber
-  (`-DLOADGUARD_TEST`: `decide ROOT`, `slots ROOT`, `measure ROOT`, `heavy`); das
-  Produktions-Binary liest immer das echte `/proc`. Laufende Prozesse kommen als
-  JSON-Specs aus `t/fixtures/procs/`. **Für k5:** ein synthetischer Payload auf
-  stdin des Produktions-Binarys liefert die Live-Entscheidung — Deny-JSON oder
-  nichts; *warum* etwas durchgeht, gibt das Binary nicht aus (k5: dafür gibt
-  es jetzt `--explain`).
-- **Rennen, akzeptiert:** zwei Sessions im selben Moment sehen beide einen freien
-  Slot; ebenso ein Befehl, dessen schwerer Prozess noch nicht läuft.
-- **Live bestätigt** (2026-09-27, `claude -p --plugin-dir` mit Haiku, Claude
-  Code 2.1.283): ruhig mit Default-Schwellen bleiben alle fünf Hooks stumm,
-  `make test` läuft. Mit `LOADGUARD_HEAVY_SLOTS=1` und einem `make test` aus
-  einer anderen Session im Slice verweigert der Hook mit Slot-Grund und nennt
-  den fremden Halter; keine Kontextzeile (volle Slots allein zählen nicht).
+  run.` Per-pattern advice only when slots are full, and for the next attempt —
+  even a small run is heavy and needs a slot: prove → `When you
+  retry, run fewer tests: prove -l t/foo.t instead of -r`; test suite → a single
+  test file. `claude -p`/`--bg` → no new sessions, in both cases.
+  **No test run as advice under pressure** (corrected in k6, k4 was
+  unreleased): every run pulls memory, a single perl can take the
+  machine (the 3.8 GB one-liner, 20260917-175030), and `prove -l
+  t/foo.t` would be refused under pressure just the same. Naming a command the
+  classifier lets through (`perl -Ilib t/foo.t`) would mean showing the AI the way
+  around its own guard. So: wait, light commands work.
+  At most three holders, then `+N more`; paths with `~`, control characters and
+  invalid UTF-8 as `?`.
+- **Cost** (reuben, 297 processes, 300 runs each including process start, `nice`):
+  light 0.53 ms median (`/bin/true`: 0.50), heavy and quiet with a full scan
+  3.64 ms (p90 4.44), heavy under pressure 0.62 ms. Target < 30 ms.
+- **Fail-open:** no PSI file, no swap, unreadable `/proc` → that signal
+  reports no pressure; a process that disappears between `readdir` and the read
+  does not count. Never exit 2, SIGPIPE ignored. Output without a
+  trailing newline — the form k7 tested live.
+- **Testability:** the root for `/proc` and `/sys` exists only in the test driver
+  (`-DLOADGUARD_TEST`: `decide ROOT`, `slots ROOT`, `measure ROOT`, `heavy`); the
+  production binary always reads the real `/proc`. Running processes come as
+  JSON specs from `t/fixtures/procs/`. **For k5:** a synthetic payload on the
+  production binary's stdin yields the live decision — deny JSON or
+  nothing; *why* something passes, the binary does not say (k5: there is
+  now `--explain` for that).
+- **Races, accepted:** two sessions at the same moment both see a free
+  slot; likewise a command whose heavy process is not running yet.
+- **Confirmed live** (2026-09-27, `claude -p --plugin-dir` with Haiku, Claude
+  Code 2.1.283): quiet with default thresholds all five hooks stay silent,
+  `make test` runs. With `LOADGUARD_HEAVY_SLOTS=1` and a `make test` from
+  another session in the slice the hook refuses with the slot reason and names
+  the foreign holder; no context line (full slots alone don't count).
 
-### Lernliste (entschieden 2026-09-27)
+### Learned list (decided 2026-09-27)
 
-Zweck: vorbeugend für schwere Befehle außerhalb der festen Liste (eigene
-Skripte, Build- und Test-Werkzeuge, die dort nicht stehen). **[korrigiert
-2026-09-27]** Als Beleg stand hier `/usr/bin/perl t/json_data.t` (3,2–3,4 GB an
-drei Tagen, 20260912/-17/-21) als Testdatei „direkt mit `perl`". Falsch: in
-allen drei Snapshots ist sein Elternprozess MakeMakers `test_harness`, er lief
-unter `make test`, das die feste Liste schon fängt (Befund k15). Keiner der 54
-Snapshots zeigt einen Fall, den erst die Lernliste gefangen hätte; der
-3,8-GB-Einzeiler kam nur einmal vor, dagegen hilft nur das Scope-Limit
-(Stufe 1).
+Purpose: preventive, for heavy commands outside the fixed list (own
+scripts, build and test tools not listed there). **[corrected
+2026-09-27]** The evidence cited here was `/usr/bin/perl t/json_data.t` (3.2–3.4 GB on
+three days, 20260912/-17/-21) as a test file run "directly with `perl`". Wrong: in
+all three snapshots its parent process is MakeMaker's `test_harness`, it ran
+under `make test`, which the fixed list already catches (finding k15). None of the 54
+snapshots shows a case only the learned list would have caught; the
+3.8 GB one-liner occurred only once, and only the scope limit helps against it
+(stage 1).
 
-- **Einheit = der exakte Befehlstext** (Getty 2026-09-27: keine Abstraktion,
-  „das meiste wird prove oder irgendwas mit nem Container sein"): der String,
-  den das Modell als `tool_input.command` schickt, byte-gleich. `cd x && …`
-  und `…` sind zwei Befehle. Nicht gelernt wird, was die feste Liste schon
-  schwer nennt.
-- **Gelernt, wenn** die Prozesse eines Befehls zusammen (RSS-Summe des
-  Teilbaums unter seiner Shell) `LOADGUARD_LEARN_RSS` % von `MemTotal`
-  erreichen, Default **20** (reuben 1,6 GB), 1–100. RSS, nicht PSS:
-  `smaps_rollup` läuft die Seitentabellen ab und kann unter Thrash hängen.
-- **Beobachter pro Session** (Getty 2026-09-27: A): das Hook-Binary im Modus
-  `--watch`, von `hooks/loadguard-confine` nach dem Einsperren abgelöst
-  gestartet (setsid, stdio auf `/dev/null`, `nice`), lebt im Scope der Session.
-  Alle 2 s: `cgroup.procs` des Scopes, je PID `/proc/<pid>/stat` und `statm` —
-  beides ohne fremde Seiten einzulagern; `cmdline` nur einmal pro neuer
-  Shell, die die Schwelle reißt. Ein Beobachter pro Scope (`flock` auf eine
-  Datei in `$XDG_RUNTIME_DIR/loadguard/`); ein fortgesetzter oder
-  verschachtelter Start im selben Scope endet sofort. Er endet, sobald der
-  Session-Prozess weg ist — er darf den Scope nie am Leben halten. Ohne
-  Binary (erste Session, Build läuft) kein Beobachter in dieser Session.
-  Verworfen: ein gemeinsamer Dienst (Singleton über D-Bus, mehr bewegliche
-  Teile); nur in Hook-Läufen mitschauen (ein Vordergrund-Befehl ruft keinen
-  Hook, solange er läuft).
-- **Welcher Befehl:** vom großen Teilbaum aufwärts die oberste
-  `<shell> -c|-lc <string>` unterhalb des Session-Prozesses. Claude Code:
-  `/bin/bash -c '… eval '<cmd>' … && pwd -P >| /tmp/claude-XXXX-cwd'` — der
-  `eval`-Text, Single-Quote-entschärft (aufgezeichnet: `'"'"'`, nicht
-  `'\''` — k15 unten), ist `tool_input.command`
-  (live 2026-09-26 für einen einfachen Befehl gesehen; Quotes, Zeilenumbrüche,
-  Heredocs, `run_in_background`: aufgezeichnet in k15). Codex: `bash -c|-lc
-  <cmd>` hinter der Sandbox-Kette, argv[2] = der Befehl (live bestätigt
-  2026-09-27, `t/fixtures/shells/codex.json`). Nicht lesbar oder unbekannte
-  Form → nichts gelernt.
-- **Sofort schreiben:** beim ersten Reißen der Schwelle, nicht erst am Ende —
-  ein Thrash-Reboot mitten im Befehl darf die Lektion nicht verlieren. Danach
-  schreibt der Beobachter den Spitzenwert nur neu, wenn er um mindestens 10 %
-  gewachsen ist, und einmal, wenn die Shell endet.
-- **Ablage:** `${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl`, eine
-  pro Nutzer, geteilt von Claude Code und Codex. Je Zeile ein JSON-Objekt:
-  Befehl, Spitzen-RSS, cwd, zuerst und zuletzt groß gesehen. Höchstens 100
-  Einträge; darüber fällt der am längsten nicht mehr groß gesehene. Schreiben
-  atomar (tmp + rename) unter `flock` — Beobachter und CLI.
-- **Im Hook:** exakter Treffer → schwer, wie ein Muster-Treffer (verweigert unter
-  Druck oder bei vollen Slots); der Grund sagt, dass er gelernt ist, mit
-  Spitzenwert und Datum. Ein laufender gelernter Befehl hält einen Slot: der
-  Scan erkennt seine Shell über dieselbe Extraktion (oberster Halter zählt,
-  wie bisher). **Invariante geändert** (Getty 2026-09-27): der leichte Pfad
-  liest jetzt eine Datei, die Lernliste — ohne Datei ein fehlgeschlagenes
-  `open`. Kaputt, zu groß, unlesbar → leer (fail-open).
-- **Schalter:** `LOADGUARD_LEARN=0` (nur genau `0`): kein Beobachter, Liste
-  ignoriert. `LOADGUARD_THROTTLE=0` schaltet wie bisher alles Verweigern ab.
-- **CLI:** `loadguard learned` (Liste mit Nummer, Spitze, zuletzt, cwd, Befehl),
-  `loadguard forget <n>` / `--all`; `explain` nennt einen gelernten Treffer;
-  `doctor` zeigt Lernen an/aus, Einträge, Beobachter dieser Session.
-- **`hooks/hooks.json` bleibt unverändert** — Codex verlangt sonst neuen Trust.
-- **Grenzen:** der erste Lauf wird nie gefangen (dafür das Scope-Limit); wer in
-  unter 2 s explodiert und im Scope gekillt wird, kann dem Beobachter entgehen;
-  eine Session ohne Scope (kein Linger, `LOADGUARD_CONFINE=0`) lernt nicht.
-  Unter Codex wird ein einzelner Befehl nicht gelernt (bash `exec`t ihn,
-  keine Shell mit dem Text; unten, k15/k14). Ein unter Claude Code gelernter
-  Befehl, der später unter Codex als einzelner Befehl läuft, wird beim
-  Eintritt verweigert (der Hook vergleicht `tool_input.command`), hält aber
-  keinen Slot, solange er läuft: Der Slot-Scan findet gelernte Befehle nur
-  über die Shell, die ihren Text trägt, und vergleicht argv nicht mit der
-  Liste. Bewusst nicht rekonstruiert (Getty 2026-09-27: der exakte Text,
-  kein argv-Nachbau).
+- **Unit = the exact command text** (Getty 2026-09-27: no abstraction,
+  "most of it will be prove or something with a container"): the string
+  the model sends as `tool_input.command`, byte for byte. `cd x && …`
+  and `…` are two commands. What the fixed list already calls heavy is
+  not learned.
+- **Learned when** a command's processes together (RSS sum of the
+  subtree below its shell) reach `LOADGUARD_LEARN_RSS` % of `MemTotal`,
+  default **20** (reuben 1.6 GB), 1–100. RSS, not PSS:
+  `smaps_rollup` walks the page tables and can hang under thrash.
+- **One watcher per session** (Getty 2026-09-27: A): the hook binary in
+  `--watch` mode, started detached by `hooks/loadguard-confine` after confinement
+  (setsid, stdio to `/dev/null`, `nice`), lives in the session's scope.
+  Every 2 s: the scope's `cgroup.procs`, per PID `/proc/<pid>/stat` and `statm` —
+  both without swapping in foreign pages; `cmdline` only once per new
+  shell that crosses the threshold. One watcher per scope (`flock` on a
+  file in `$XDG_RUNTIME_DIR/loadguard/`); a resumed or
+  nested start in the same scope ends immediately. It ends as soon as the
+  session process is gone — it must never keep the scope alive. Without a
+  binary (first session, build running) there is no watcher in that session.
+  Rejected: a shared service (singleton over D-Bus, more moving
+  parts); only watching during hook runs (a foreground command calls no
+  hook while it runs).
+- **Which command:** from the large subtree upward, the topmost
+  `<shell> -c|-lc <string>` below the session process. Claude Code:
+  `/bin/bash -c '… eval '<cmd>' … && pwd -P >| /tmp/claude-XXXX-cwd'` — the
+  `eval` text, with single quotes unescaped (recorded: `'"'"'`, not
+  `'\''` — k15 below), is `tool_input.command`
+  (seen live 2026-09-26 for a simple command; quotes, newlines,
+  heredocs, `run_in_background`: recorded in k15). Codex: `bash -c|-lc
+  <cmd>` behind the sandbox chain, argv[2] = the command (confirmed live
+  2026-09-27, `t/fixtures/shells/codex.json`). Unreadable or unknown
+  form → nothing learned.
+- **Write immediately:** at the first crossing of the threshold, not only at the end —
+  a thrash reboot in the middle of the command must not lose the lesson. After that
+  the watcher rewrites the peak only when it has grown by at least 10 %,
+  and once when the shell ends.
+- **Storage:** `${XDG_STATE_HOME:-~/.local/state}/loadguard/learned.jsonl`, one
+  per user, shared by Claude Code and Codex. One JSON object per line:
+  command, peak RSS, cwd, first and last seen large. At most 100
+  entries; beyond that the one not seen large for the longest drops out. Writes are
+  atomic (tmp + rename) under `flock` — watcher and CLI.
+- **In the hook:** exact match → heavy, like a pattern match (refused under
+  pressure or with full slots); the reason says it is learned, with
+  peak and date. A running learned command holds a slot: the
+  scan recognizes its shell via the same extraction (topmost holder counts,
+  as before). **Invariant changed** (Getty 2026-09-27): the light path
+  now reads one file, the learned list — without a file, one failed
+  `open`. Broken, too large, unreadable → empty (fail-open).
+- **Switches:** `LOADGUARD_LEARN=0` (exactly `0` only): no watcher, list
+  ignored. `LOADGUARD_THROTTLE=0` switches off all refusing, as before.
+- **CLI:** `loadguard learned` (list with number, peak, last, cwd, command),
+  `loadguard forget <n>` / `--all`; `explain` names a learned match;
+  `doctor` shows learning on/off, entries, this session's watcher.
+- **`hooks/hooks.json` stays unchanged** — otherwise Codex demands new trust.
+- **Limits:** the first run is never caught (that is what the scope limit is for);
+  whatever explodes in under 2 s and is killed in the scope can escape the watcher;
+  a session without a scope (no linger, `LOADGUARD_CONFINE=0`) does not learn.
+  Under Codex a single command is not learned (bash `exec`s it,
+  no shell carries the text; below, k15/k14). A command learned under Claude Code
+  that later runs under Codex as a single command is refused on
+  entry (the hook compares `tool_input.command`), but holds
+  no slot while it runs: the slot scan finds learned commands only
+  via the shell that carries their text, and does not compare argv with the
+  list. Deliberately not reconstructed (Getty 2026-09-27: the exact text,
+  no argv rebuild).
 
-### Umgesetzt (k15): Lernliste
+### Implemented (k15): learned list
 
-`src/loadguard-hook.c` (`--watch`, Liste im Hook und im Slot-Scan),
+`src/loadguard-hook.c` (`--watch`, list in the hook and in the slot scan),
 `lib/loadguard/learn.py`, `hooks/loadguard-confine`, `lib/loadguard/cli.py`;
-Tests `t/test_learn.py`, dazu `t/test_cli.py` `Doctor`,
-`t/test_hook_passthrough.py` `CodexRuns`/`PluginWiring`; Fixtures
+tests `t/test_learn.py`, plus `t/test_cli.py` `Doctor`,
+`t/test_hook_passthrough.py` `CodexRuns`/`PluginWiring`; fixtures
 `t/fixtures/shells/claude-code.json`.
 
-- **Wrapper aufgezeichnet** (2026-09-27, Claude Code 2.1.283, zehn eigene
-  Bash-Aufrufe; ein Kind las `/proc/<Wrapper>/cmdline`, nur lesend, keine
-  Last): `/bin/bash -c 'source <snapshot> 2>/dev/null || true && shopt -u
+- **Wrapper recorded** (2026-09-27, Claude Code 2.1.283, ten own
+  Bash calls; a child read `/proc/<wrapper>/cmdline`, read-only, no
+  load): `/bin/bash -c 'source <snapshot> 2>/dev/null || true && shopt -u
   extglob 2>/dev/null || true && { \builtin unalias … } >/dev/null 2>&1 ||
-  true && eval '<cmd>' < /dev/null && pwd -P >| /tmp/claude-XXXX-cwd'`. Ein
-  `'` im Befehl steht als **`'"'"'`** (Quote zu, `"'"`, Quote auf), nicht
-  als `'\''` wie oben angenommen. ` < /dev/null` fehlt, wenn der Befehl
-  einen Heredoc oder eine eigene stdin-Umleitung hat. Einfache und doppelte
-  Quotes, Heredoc, Zeilenumbruch, Zeilenfortsetzung, `$(…)`, Backslashes,
-  UTF-8, `cd x &&`, führende und abschließende Leerzeichen,
-  `run_in_background` (dieselbe Form): In allen zehn Fällen liest die
-  Extraktion den gesendeten Befehl Byte für Byte zurück.
-- **Eine Extraktion** (`shell_command()`) für Beobachter und Slot-Scan:
-  `<shell> -c|-lc <string>`, Shell bash, sh, dash oder zsh. Claude Code:
-  das Wort nach dem ersten `eval `, gelesen wie die Shell es liest (`'…'`
-  wörtlich, `"…"` mit `\"` `\\` `\$` `` \` `` `\<NL>`, `\x`), danach genau
-  `[ < /dev/null] && pwd -P >| <pfad>-cwd` bis zum Ende. `$` oder Backtick
-  in `"…"`, jedes andere ungequotete Zeichen, ein anderes Ende → unbekannte
-  Form. Beide Quote-Schreibweisen lesen sich gleich. Codex: argv[2]
-  unverändert. Der Beobachter nimmt die Form des Session-Prozesses (claude →
-  nur der Wrapper, codex → nur argv[2]) — so wird unter Claude Code ein
-  MCP-Server hinter `sh -c 'context7-mcp'` (so auf reuben) nie gelernt; der
-  Slot-Scan kennt den Harness nicht und nimmt den Wrapper, sonst argv[2].
-- **Beobachter** `loadguard-hook --watch PID`, PID = der Prozess, für den der
-  Scope angelegt wurde (die Zahl im Scope-Namen): Ein verschachteltes
-  `claude -p` oder ein weiterer App-Server-Thread fragt nach dem Beobachter,
-  der schon läuft. Beim Start: `comm`/argv[0] `claude` oder `codex`,
-  `/proc/PID/cgroup` endet in `loadguard-*.scope`, MemTotal lesbar,
-  `$XDG_RUNTIME_DIR` gesetzt und `<scope>.watch` darin per `flock` LOCK_NB
-  frei (die Datei hält seine PID, für `doctor`) — sonst sofort exit 0.
-  `setpriority` 10, `chdir /`, keine Ausgabe. Alle 2 s: Startzeit des
-  Session-Prozesses unverändert (sonst Ende, auch bei wiederverwendeter
-  PID), `cgroup.procs`, je PID `stat` (ppid, comm, Startzeit) und `statm`.
-  Aufruf = oberste Shell (nach `comm`) unter dem Session-Prozess, seine
-  RSS = Summe über Shell und alle Nachfahren; Waisen (Eltern nicht im Scope,
-  `foo &` nach Ende der Shell) zählen niemandem. `cmdline` genau einmal, wenn
-  ein Aufruf die Schwelle reißt; danach gelernt oder als übersprungen
-  gemerkt, bis seine Shell endet (höchstens 16 zugleich). Nicht gelernt:
-  unbekannte Form, feste Liste, leer, über 4096 Byte, kein UTF-8.
-  Geschrieben wird beim Reißen, bei ≥ 10 % mehr, beim Ende der Shell, und
-  für alle offenen, wenn der Session-Prozess weg ist. Die Lock-Datei geht
-  mit ihm.
-- **Liste**: je Zeile `{"command", "peak_rss" (Byte, der höchste je
-  gesehene), "cwd", "first_seen", "last_seen" (UTC, ISO 8601)}`. Beobachter
-  und `loadguard forget` schreiben unter `flock` auf `learned.lock`: neue
-  Datei, `fsync`, `rename`, `fsync` des Verzeichnisses; Modus 0600, das
-  Verzeichnis 0700. Über 100 Einträge fällt der mit dem kleinsten
-  `last_seen`; kaputte Zeilen fallen beim Schreiben weg, eine zu große Datei
-  wird ersetzt.
-- **Im Hook**: erst die Muster, dann die Liste (`K_LEARNED`, hält einen
-  Slot). Gelesen per `open(O_NONBLOCK)` und `fstat`: nur eine reguläre Datei
-  bis 1 MiB, höchstens 256 Zeilen — ein FIFO an ihrer Stelle blockiert den
-  leichten Pfad nicht. Grund: `loadguard: heavy command refused (learned:
-  peaked at 3.4 GiB RSS on 2026-09-21): memory pressure …` (Datum aus
-  `last_seen`, nur `JJJJ-MM-TT` übernommen); Rat wie bei jedem schweren
-  Befehl, ohne eigenen Zusatz. Slot-Scan: eine Shell, deren Befehl in der
-  Liste steht, ist Halter, benannt nach dem Befehl (auf 48 Byte gekürzt);
-  sie liest cmdlines bis 64 KiB, abgeschnitten → kein Treffer; leere Liste →
-  keine Extraktion.
-- **Start**: `hooks/loadguard-confine` nach `confine()`, nur bei `attached`
-  oder `already`, Binary aus `$CLAUDE_PLUGIN_DATA/bin` (Codex setzt es
-  ebenso), abgelöst wie der Build (fork, setsid, stdio auf `/dev/null`,
-  cwd `/`, nicht gewartet). Nach `attached` läuft der Hook außerhalb des
-  Scopes — `confine()` verschiebt die Session, nicht die Hook-Kette —, also
-  kommt der Beobachter per `AttachProcessesToUnit` hinein; nach `already`
-  ist der Hook schon drin. `hooks.json` Byte für Byte unverändert (ein Test
-  pinnt den SHA-256).
-- **Report und CLI**: `--report` hat `learn` (`on`, `file`, `state`,
-  `entries`, `rss_limit`); `ignored` nennt `LOADGUARD_LEARN` ≠ `0` und ein
-  ungültiges `LOADGUARD_LEARN_RSS`. `loadguard learned` (Nummer, Spitze,
-  zuletzt, cwd, Befehl; nur ASCII), `loadguard forget <n>…|--all`; `explain`
-  nennt den Treffer im heavy-Label (`yes (learned: …)`); `doctor` hat den
-  Abschnitt „learning": Liste, Schwelle in GiB, der Beobachter dieser Session
-  (PID aus `<scope>.watch`, deren argv `… --watch …`). Fehlt er in einer
-  eingesperrten Session, ist das FAIL.
-- **Kosten** (reuben, 318 Prozesse, je 1500 Läufe abwechselnd gegen HEAD,
-  `nice`, Prozessstart inklusive): leicht HEAD 0,579 ms → ohne Liste 0,585,
-  mit 100 Einträgen (19 KB) 0,713 (p90 0,876), 100 Einträge à 1 KiB
-  (117 KB) 0,939 — das Parsen jeder Zeile mit cJSON. Schwer mit Scan 5,716
-  → 5,739 ohne, 5,911 mit 100 Einträgen. Ein Takt des Beobachters (Treiber
-  mit Produktions-Flags, 1000 Durchläufe über die echten Scopes, Host
-  beschäftigt): 27 µs bei einem Prozess bis 0,9 ms bei 34, etwa 15–26 µs je
-  Prozess — alle 2 s.
-- **Beleg, genauer besehen**: In allen drei Snapshots ist
-  `/usr/bin/perl t/json_data.t` (bis 3 746 216 kB, 46,6 % am 2026-09-17) ein
-  Kind des MakeMaker-Testharness (`perl -MExtUtils::Command::MM
-  -MTest::Harness -e … test_harness(…)`), lief also unter `make test`, das
-  die feste Liste schon schwer nennt; die Shell darüber zeigen die Snapshots
-  nicht. Die Lernliste bleibt für Befehle außerhalb der Liste — der Beleg
-  oben trägt sie weniger, als er klingt.
-- **Grenzen, dazu**: bash 5.2 `exec`t den letzten Befehl eines `-c`-Strings
-  (auf reuben geprüft, harmlose `sleep`: `bash -c 'sleep 2'` und `bash -c
-  'cd /tmp && sleep 2'` hinterlassen nur `sleep`, `'sleep 2; true'` behält
-  bash). Codex startet jeden Aufruf als `bash -c <cmd>` — ein einzelner
-  Befehl oder `cd x && cmd` läuft also ohne Shell, aus der sich der Text
-  lesen ließe, und wird unter Codex **nicht gelernt**; nur Aufrufe, bei
-  denen bash bleibt (Pipes, `;`-Listen, Schleifen), liefern argv[2]
-  (`test_codex_lone_command_leaves_no_shell`). Claude Code betrifft das
-  nicht: Nach dem `eval` folgt `&& pwd -P …`, die Shell bleibt (so
-  aufgezeichnet). Deshalb führt `procs/codex-session.json` seit k16 eine
-  `;`-Liste aus (`prove -lr t/; echo "exit $?"`: bash 7203 → prove 7204),
-  wie live gesehen; mit `prove -lr t/` allein gäbe es bash 7203 nicht. Die
-  Slot-Zählung beurteilt argv, es bleibt ein Slot. Überlebt ein `claude
-  --bg` die Session, deren Scope er teilt, endet der Beobachter mit dem
-  Scope-Eigner; der Rest läuft unbeobachtet weiter. Ein Befehl, den der Beobachter unter Codex liest, der aber anders
-  ankommt als gesendet, landet als Text, der nie trifft.
-- **Codex live bestätigt** (2026-09-27, codex-cli 0.153.4): argv[2] der
-  Shell ist der Befehl des Modells, Byte für Byte — das Snapshot-Skript
-  `exec`t genau ihn (`sleep 45; echo "lg probe" 'x'`,
-  `t/fixtures/shells/codex.json`, `test_recorded_codex_shell`). bash blieb
-  bei der `;`-Liste, `sleep` lief als Kind. Wie oft bash bleibt, hängt
-  davon ab, wie das Modell seine Befehle schreibt (siehe Grenzen).
-- **Offen**: Claude Codes zsh-Wrapper ist nicht aufgezeichnet (dieselbe Form
-  erwartet). zsh ist auf reuben nicht installiert (k14), aufzeichnen lässt
-  er sich hier also nicht; gebaut wird dafür nichts. Unter `SHELL=zsh` liest
-  die Extraktion ihn, falls er dieselbe Form hat, sonst gilt er als
-  unbekannte Form: nichts gelernt, kein Slot über die Lernliste.
+  true && eval '<cmd>' < /dev/null && pwd -P >| /tmp/claude-XXXX-cwd'`. A
+  `'` in the command appears as **`'"'"'`** (close quote, `"'"`, open quote), not
+  as `'\''` as assumed above. ` < /dev/null` is missing when the command
+  has a heredoc or its own stdin redirection. Single and double
+  quotes, heredoc, newline, line continuation, `$(…)`, backslashes,
+  UTF-8, `cd x &&`, leading and trailing spaces,
+  `run_in_background` (same form): in all ten cases the
+  extraction reads back the sent command byte for byte.
+- **One extraction** (`shell_command()`) for watcher and slot scan:
+  `<shell> -c|-lc <string>`, shell bash, sh, dash or zsh. Claude Code:
+  the word after the first `eval `, read the way the shell reads it (`'…'`
+  literal, `"…"` with `\"` `\\` `\$` `` \` `` `\<NL>`, `\x`), then exactly
+  `[ < /dev/null] && pwd -P >| <path>-cwd` to the end. `$` or backtick
+  in `"…"`, any other unquoted character, a different ending → unknown
+  form. Both quote spellings read the same. Codex: argv[2]
+  unchanged. The watcher takes the form of the session process (claude →
+  only the wrapper, codex → only argv[2]) — so under Claude Code an
+  MCP server behind `sh -c 'context7-mcp'` (as on reuben) is never learned; the
+  slot scan does not know the harness and takes the wrapper, otherwise argv[2].
+- **Watcher** `loadguard-hook --watch PID`, PID = the process the
+  scope was created for (the number in the scope name): a nested
+  `claude -p` or another app-server thread asks for the watcher
+  that is already running. At start: `comm`/argv[0] `claude` or `codex`,
+  `/proc/PID/cgroup` ends in `loadguard-*.scope`, MemTotal readable,
+  `$XDG_RUNTIME_DIR` set and `<scope>.watch` in it free via `flock` LOCK_NB
+  (the file holds its PID, for `doctor`) — otherwise exit 0 immediately.
+  `setpriority` 10, `chdir /`, no output. Every 2 s: start time of the
+  session process unchanged (otherwise end, also on a reused
+  PID), `cgroup.procs`, per PID `stat` (ppid, comm, start time) and `statm`.
+  Invocation = topmost shell (by `comm`) below the session process, its
+  RSS = sum over the shell and all descendants; orphans (parent not in the scope,
+  `foo &` after the shell ended) count for nobody. `cmdline` exactly once, when
+  an invocation crosses the threshold; after that learned or remembered as
+  skipped until its shell ends (at most 16 at a time). Not learned:
+  unknown form, fixed list, empty, over 4096 bytes, not UTF-8.
+  Written at the crossing, at ≥ 10 % more, at the end of the shell, and
+  for all open ones when the session process is gone. The lock file goes
+  with it.
+- **List**: per line `{"command", "peak_rss" (bytes, the highest ever
+  seen), "cwd", "first_seen", "last_seen" (UTC, ISO 8601)}`. Watcher
+  and `loadguard forget` write under `flock` on `learned.lock`: new
+  file, `fsync`, `rename`, `fsync` of the directory; mode 0600, the
+  directory 0700. Beyond 100 entries the one with the smallest
+  `last_seen` drops out; broken lines drop out on write, a file that is too large
+  is replaced.
+- **In the hook**: first the patterns, then the list (`K_LEARNED`, holds a
+  slot). Read via `open(O_NONBLOCK)` and `fstat`: only a regular file
+  up to 1 MiB, at most 256 lines — a FIFO in its place does not block the
+  light path. Reason: `loadguard: heavy command refused (learned:
+  peaked at 3.4 GiB RSS on 2026-09-21): memory pressure …` (date from
+  `last_seen`, only `YYYY-MM-DD` taken); advice as for any heavy
+  command, without an addition of its own. Slot scan: a shell whose command is in the
+  list is a holder, named after the command (truncated to 48 bytes);
+  it reads cmdlines up to 64 KiB, truncated → no match; empty list →
+  no extraction.
+- **Start**: `hooks/loadguard-confine` after `confine()`, only on `attached`
+  or `already`, binary from `$CLAUDE_PLUGIN_DATA/bin` (Codex sets it
+  too), detached like the build (fork, setsid, stdio to `/dev/null`,
+  cwd `/`, not waited for). After `attached` the hook runs outside the
+  scope — `confine()` moves the session, not the hook chain —, so
+  the watcher gets in via `AttachProcessesToUnit`; after `already`
+  the hook is already inside. `hooks.json` unchanged byte for byte (a test
+  pins the SHA-256).
+- **Report and CLI**: `--report` has `learn` (`on`, `file`, `state`,
+  `entries`, `rss_limit`); `ignored` names `LOADGUARD_LEARN` ≠ `0` and an
+  invalid `LOADGUARD_LEARN_RSS`. `loadguard learned` (number, peak,
+  last, cwd, command; ASCII only), `loadguard forget <n>…|--all`; `explain`
+  names the match in the heavy label (`yes (learned: …)`); `doctor` has the
+  section "learning": list, threshold in GiB, this session's watcher
+  (PID from `<scope>.watch`, whose argv is `… --watch …`). If it is missing in a
+  confined session, that is a FAIL.
+- **Cost** (reuben, 318 processes, 1500 runs each alternating against HEAD,
+  `nice`, process start included): light HEAD 0.579 ms → without a list 0.585,
+  with 100 entries (19 KB) 0.713 (p90 0.876), 100 entries of 1 KiB each
+  (117 KB) 0.939 — parsing every line with cJSON. Heavy with scan 5.716
+  → 5.739 without, 5.911 with 100 entries. One watcher tick (driver
+  with production flags, 1000 passes over the real scopes, host
+  busy): 27 µs for one process up to 0.9 ms for 34, about 15–26 µs per
+  process — every 2 s.
+- **Evidence, looked at more closely**: in all three snapshots
+  `/usr/bin/perl t/json_data.t` (up to 3 746 216 kB, 46.6 % on 2026-09-17) is a
+  child of the MakeMaker test harness (`perl -MExtUtils::Command::MM
+  -MTest::Harness -e … test_harness(…)`), so it ran under `make test`, which
+  the fixed list already calls heavy; the snapshots don't show the shell above it.
+  The learned list stays for commands outside the list — the evidence
+  above supports it less than it sounds.
+- **Limits, in addition**: bash 5.2 `exec`s the last command of a `-c` string
+  (checked on reuben, harmless `sleep`: `bash -c 'sleep 2'` and `bash -c
+  'cd /tmp && sleep 2'` leave only `sleep`, `'sleep 2; true'` keeps
+  bash). Codex starts every call as `bash -c <cmd>` — so a single
+  command or `cd x && cmd` runs without a shell from which the text could be
+  read, and is **not learned** under Codex; only calls where
+  bash stays (pipes, `;` lists, loops) yield argv[2]
+  (`test_codex_lone_command_leaves_no_shell`). Claude Code is not affected:
+  after the `eval` comes `&& pwd -P …`, the shell stays (as
+  recorded). That is why `procs/codex-session.json` runs a
+  `;` list since k16 (`prove -lr t/; echo "exit $?"`: bash 7203 → prove 7204),
+  as seen live; with `prove -lr t/` alone there would be no bash 7203. The
+  slot count judges argv, it stays one slot. If a `claude
+  --bg` outlives the session whose scope it shares, the watcher ends with the
+  scope owner; the rest keeps running unwatched. A command the watcher reads under Codex but that
+  arrives differently from how it was sent ends up as text that never matches.
+- **Codex confirmed live** (2026-09-27, codex-cli 0.153.4): argv[2] of the
+  shell is the model's command, byte for byte — the snapshot script
+  `exec`s exactly that (`sleep 45; echo "lg probe" 'x'`,
+  `t/fixtures/shells/codex.json`, `test_recorded_codex_shell`). bash stayed
+  for the `;` list, `sleep` ran as a child. How often bash stays depends
+  on how the model writes its commands (see limits).
+- **Open**: Claude Code's zsh wrapper is not recorded (the same form is
+  expected). zsh is not installed on reuben (k14), so it cannot be recorded
+  here; nothing is built for it. Under `SHELL=zsh` the
+  extraction reads it if it has the same form, otherwise it counts as an
+  unknown form: nothing learned, no slot via the learned list.
 
-### Stufe 4 — Lagebewusstsein (optional)
+### Stage 4 — Situational awareness (optional)
 
-`UserPromptSubmit`/`SessionStart`: nur wenn die Last erhöht ist, eine Zeile Status in
-den Kontext. Im Normalzustand kostet loadguard **null** Kontext-Tokens.
+`UserPromptSubmit`/`SessionStart`: only when the load is elevated, one status line into
+the context. In the normal state loadguard costs **zero** context tokens.
 
-Umgesetzt (k6, `src/loadguard-hook.c`, `hooks/hooks.json`; Tests
+Implemented (k6, `src/loadguard-hook.c`, `hooks/hooks.json`; tests
 `t/test_throttle.py` `Context`, `Calibration`, `LiveHost`,
 `t/test_hook_passthrough.py`):
 
-- **Signal = die Druck-Hälfte von k4, genau** (Getty 2026-09-26: wie k4, nicht
-  zram): memory `full avg10` ≥ `LOADGUARD_PSI_FULL` oder Swap gesamt ≥
-  `LOADGUARD_SWAP_USED`. `under_pressure()` ist die erste Hälfte von
-  `no_room()`, beide rufen sie — kein zweiter Vergleich, keine eigene
-  Schwelle. **Volle Slots allein geben keine Zeile:** Der Host ist dann in
-  Ordnung, ein Slot wird bald frei, und der Deny-Grund sagt es im Moment des
-  Versuchs. Kein Slot-Scan, also liest der Pfad auch im Ruhezustand keinen
-  fremden Prozess (Test: cmdline als FIFO). `Calibration`: in allen 54
-  Snapshots bekommt Thrash die Zeile, ruhig bleibt stumm.
-- **Dasselbe Binary, derselbe Starter:** `hook()` verzweigt auf
-  `hook_event_name` — `UserPromptSubmit`/`SessionStart` → Zeile oder nichts,
-  alles andere → der PreToolUse-Pfad wie bisher (auch ohne
-  `hook_event_name`). Kein Python: UserPromptSubmit läuft vor jedem Prompt
-  jeder Session.
-- **Kanal:** `{"hookSpecificOutput":{"hookEventName":"<Event>",
-  "additionalContext":"<Zeile>"}}`, ohne Zeilenumbruch, exit 0. Laut
-  Hooks-Docs (code.claude.com/docs/en/hooks, gelesen 2026-09-26) landen bei
-  beiden Events Plain-stdout **und** `additionalContext` als System-Reminder
-  im Kontext: UserPromptSubmit neben dem Prompt, SessionStart vor dem ersten.
-  JSON, weil Codex (k11) dieselbe Form annimmt, aber unbekannte
-  Top-Level-Keys ablehnt; deshalb nur `hookSpecificOutput`.
-- **Synchron.** Async-Hooks werden laut Docs nicht verworfen: ihr
-  `additionalContext` kommt „on the next conversation turn", und `-p` killt
-  sie beim Beenden — für SessionStart zu spät oder gar nicht. Synchron kostet
-  ~0,6 ms; Claudes erste Antwort wartet ohnehin auf die SessionStart-Hooks.
-  Timeout 5 s wie PreToolUse (Default auf UserPromptSubmit: 30 s; ein
-  Timeout verwirft die Ausgabe, der Prompt geht ohne Zeile durch).
-- **Live bestätigt** (2026-09-26, `claude -p --plugin-dir` mit Haiku,
-  `LOADGUARD_PSI_FULL=1 LOADGUARD_SWAP_USED=1`, Claude Code 2.1.283): Die
-  Zeile kommt über SessionStart und UserPromptSubmit beim Modell an, es
-  zitiert beide wörtlich. `make test` verweigert der Hook; das Modell sieht
-  das als fehlgeschlagenen Tool-Aufruf `PreToolUse:Bash hook error: <Grund>`
-  (`is_error`) und gibt den Grund korrekt wieder. Kosten 0,02 $.
-- **Nie exit 2:** Auf UserPromptSubmit blockiert exit 2 den Prompt und löscht
-  ihn. Jeder Pfad endet mit exit 0; Test: Produktions-Binary direkt und über
-  den Starter, gültige, kaputte, leere und zu große Payloads, drei
-  Umgebungen.
-- **Die Zeile**, englisch, eine Zeile, höchstens 216 Zeichen (100 % gegen
-  Grenzen von 100 %), Tatsachen statt Anweisungen — die Docs warnen, dass als
-  System-Anweisung formulierter Text die Prompt-Injection-Abwehr auslösen
-  kann:
+- **Signal = exactly the pressure half of k4** (Getty 2026-09-26: like k4, not
+  zram): memory `full avg10` ≥ `LOADGUARD_PSI_FULL` or total swap ≥
+  `LOADGUARD_SWAP_USED`. `under_pressure()` is the first half of
+  `no_room()`, both call it — no second comparison, no threshold of its own.
+  **Full slots alone produce no line:** the host is fine then,
+  a slot frees up soon, and the deny reason says so at the moment of the
+  attempt. No slot scan, so the path reads no foreign process even at rest
+  (test: cmdline as a FIFO). `Calibration`: in all 54
+  snapshots thrash gets the line, quiet stays silent.
+- **Same binary, same launcher:** `hook()` branches on
+  `hook_event_name` — `UserPromptSubmit`/`SessionStart` → line or nothing,
+  everything else → the PreToolUse path as before (also without
+  `hook_event_name`). No Python: UserPromptSubmit runs before every prompt
+  of every session.
+- **Channel:** `{"hookSpecificOutput":{"hookEventName":"<Event>",
+  "additionalContext":"<line>"}}`, without a newline, exit 0. According to the
+  hooks docs (code.claude.com/docs/en/hooks, read 2026-09-26), for
+  both events plain stdout **and** `additionalContext` land in the context
+  as a system reminder: UserPromptSubmit next to the prompt, SessionStart before the first one.
+  JSON, because Codex (k11) accepts the same form but rejects unknown
+  top-level keys; hence only `hookSpecificOutput`.
+- **Synchronous.** Async hooks are not discarded according to the docs: their
+  `additionalContext` arrives "on the next conversation turn", and `-p` kills
+  them on exit — too late or not at all for SessionStart. Synchronous costs
+  ~0.6 ms; Claude's first answer waits for the SessionStart hooks anyway.
+  Timeout 5 s like PreToolUse (default on UserPromptSubmit: 30 s; a
+  timeout discards the output, the prompt goes through without a line).
+- **Confirmed live** (2026-09-26, `claude -p --plugin-dir` with Haiku,
+  `LOADGUARD_PSI_FULL=1 LOADGUARD_SWAP_USED=1`, Claude Code 2.1.283): the
+  line reaches the model via SessionStart and UserPromptSubmit, it
+  quotes both verbatim. The hook refuses `make test`; the model sees
+  that as a failed tool call `PreToolUse:Bash hook error: <reason>`
+  (`is_error`) and reports the reason correctly. Cost $0.02.
+- **Never exit 2:** on UserPromptSubmit exit 2 blocks the prompt and erases
+  it. Every path ends with exit 0; test: production binary directly and via
+  the launcher, valid, broken, empty and oversized payloads, three
+  environments.
+- **The line**, English, one line, at most 216 characters (100 % against
+  limits of 100 %), facts instead of instructions — the docs warn that text
+  phrased as a system instruction can trigger the prompt-injection defense:
 
   > loadguard: memory pressure full=59.9% (limit 10%), swap 100% used (limit
   > 90%). Heavy commands refused until it eases: prove, make test, builds, new
   > claude -p/--bg. Light commands still run; see `loadguard status`.
 
-  Die Zahlen formatiert `pressure_figures()`, wie im Deny-Grund (dort folgt
-  zram). **Kein Testlauf als Rat**, auch kein kleiner — aus demselben Grund
-  wie im Deny-Grund unter Druck (k4 oben): Jeder Lauf zieht Speicher, und ein
-  Befehl, den der Klassifizierer durchlässt (ein erster Entwurf nannte `perl
-  -Ilib t/x.t`), zeigte der KI den Weg um den Wächter. `loadguard status`
-  geht, weil `bin/` auf dem PATH des Bash-Tools liegt (k5).
-- **Kein Zustand:** Unter Druck bekommt jeder Prompt die Zeile, kein Dedup —
-  Einfachheit vor ein paar Tokens in einem seltenen Zustand.
-- **`LOADGUARD_THROTTLE=0` schaltet auch die Zeile ab:** Ohne Verweigern wäre
-  sie falsch. Ein Schalter für „nichts verweigern, nichts melden".
-- **Report-Modi:** keine neue Angabe. `--report` hat `throttle` und
-  `pressured`; die Zeile erscheint genau, wenn beide `true` sind (Test
-  `test_same_pressure_as_the_hook`, samt denselben Zahlen wie im Deny-Grund).
-- **Kosten** (reuben, je 1500 Läufe abwechselnd gegen HEAD, `nice`):
-  PreToolUse leicht 0,559 → 0,555 ms, schwer 4,139 → 4,130 ms Median —
-  unverändert. UserPromptSubmit ruhig 0,61 ms, SessionStart 0,68 ms, mit
-  Zeile (Grenzen per Env erzwungen) 0,60 ms.
-- **Erste Session nach der Installation:** Das Binary wird async gebaut, bis
-  dahin gibt der Starter nichts aus — keine Zeile, fail-open wie PreToolUse.
+  `pressure_figures()` formats the numbers, as in the deny reason (where
+  zram follows). **No test run as advice**, not even a small one — for the same reason
+  as in the deny reason under pressure (k4 above): every run pulls memory, and a
+  command the classifier lets through (a first draft named `perl
+  -Ilib t/x.t`) would show the AI the way around the guard. `loadguard status`
+  works because `bin/` is on the Bash tool's PATH (k5).
+- **No state:** under pressure every prompt gets the line, no dedup —
+  simplicity over a few tokens in a rare state.
+- **`LOADGUARD_THROTTLE=0` also switches off the line:** without refusing it would
+  be wrong. One switch for "refuse nothing, report nothing".
+- **Report modes:** no new field. `--report` has `throttle` and
+  `pressured`; the line appears exactly when both are `true` (test
+  `test_same_pressure_as_the_hook`, including the same numbers as in the deny reason).
+- **Cost** (reuben, 1500 runs each alternating against HEAD, `nice`):
+  PreToolUse light 0.559 → 0.555 ms, heavy 4.139 → 4.130 ms median —
+  unchanged. UserPromptSubmit quiet 0.61 ms, SessionStart 0.68 ms, with
+  a line (limits forced via env) 0.60 ms.
+- **First session after installation:** the binary is built async; until
+  then the launcher outputs nothing — no line, fail-open like PreToolUse.
 
 ### CLI
 
-`bin/loadguard`: `status` (PSI, Slots, wer hält sie), `doctor`
-(cgroup-Delegation, busctl, Schwellwerte), `explain '<cmd>'` (wie würde der
-Hook entscheiden). Hook-Einstieg ist seit k8 `hooks/loadguard`.
+`bin/loadguard`: `status` (PSI, slots, who holds them), `doctor`
+(cgroup delegation, busctl, thresholds), `explain '<cmd>'` (how the
+hook would decide). The hook entry point is `hooks/loadguard` since k8.
 
-Umgesetzt (k5, `bin/loadguard`, `lib/loadguard/cli.py`; Tests
+Implemented (k5, `bin/loadguard`, `lib/loadguard/cli.py`; tests
 `t/test_cli.py`, `t/test_throttle.py` `Report`):
 
-- **Die Entscheidung existiert einmal, im C-Binary.** Es hat zwei Report-Modi,
-  je eine JSON-Zeile auf stdout, nur lesend: `loadguard-hook --report`
-  (Grenzen, memory PSI full/some, Swap, zram, Slots mit Haltern,
-  `refuse_heavy`; liest kein stdin) und `loadguard-hook --explain`
-  (Hook-Payload auf stdin; `decision`, `reason` wörtlich, dazu was gemessen
-  wurde). Beide rufen `objection()` und `no_room()`, die Funktionen des
-  Hook-Pfads; ein `struct verdict` hält fest, wie weit sie gekommen sind. Die
-  CLI formatiert nur: Sie klassifiziert keinen Befehl, scannt kein `/proc` und
-  vergleicht keinen Wert mit einer Grenze. Test `test_explain_is_the_hook`:
-  4 Wurzeln × 5 Umgebungen × 8 Befehle, Entscheidung und Grund wie `decide`,
-  Byte für Byte.
-- **Hook-Modus unverändert:** Jeder Aufruf außer genau `--report` oder
-  `--explain` ist der Hook wie bisher; `hooks/loadguard` startet ohne
-  Argumente. Gemessen (je 1500 Aufrufe, abwechselnd gegen HEAD, `nice`):
-  leicht 0,609 → 0,605 ms, schwer mit Scan 4,002 → 4,003 ms Median.
-- **Keine Wurzel im Produktions-Binary:** `report ROOT`/`explain ROOT` gibt es
-  nur im Testtreiber; damit sind die Formatierungen auf Fixtures getestet.
-- **Ungültige Env-Werte:** Der Report nennt gesetzte Variablen, die nichts
-  ändern (`ignored`) — Grenzen, die `env_int` verwirft (dieselbe Prüfung wie
-  der Hook), und `LOADGUARD_THROTTLE` ≠ `0`. Die Stufe-1-Variablen prüft
-  `doctor` mit `confine.env_int`.
-- **`status` unter Druck scannt nicht**, wie der Hook: Die Slot-Zeile sagt,
-  dass nichts gelesen wurde und warum (cmdline-Lesen kann auf Swap warten);
-  Druck allein verweigert. So bleibt `status` im Thrash schnell. Dazu wartet
-  die CLI höchstens 10 s auf das Binary und danach nicht auf dessen Ende — ein
-  Leser, der auf Swap wartet, stirbt nicht sofort.
-- **Welches Binary:** `$CLAUDE_PLUGIN_DATA`, wenn gesetzt — laut
-  plugins-reference bekommen es Hooks, das Bash-Tool nicht. Sonst für eine
-  installierte Kopie (`<plugins>/cache/<marketplace>/<plugin>/<version>/`)
-  deren Datenverzeichnis `<plugins>/data/<id>`, id `<plugin>@<marketplace>`
-  mit allem außer `[A-Za-z0-9_-]` als `-` (reuben: `loadguard-getty`). Im
-  Checkout `build/` (make), ohne Build das Datenverzeichnis einer
-  `--plugin-dir`-Session (`loadguard@inline` → `loadguard-inline`). Kein Glob
-  `loadguard-*`: Auf reuben liegen `loadguard-getty` und `loadguard-inline`
-  nebeneinander, mit Binarys verschiedener Stände. Ohne Binary sagen
-  `status`/`explain` klar: Pass-through, nichts wird verweigert. Ein Binary
-  ohne Report-Modus (ältere Quellen) → Hinweis, Exit 1. Die CLI baut nie;
-  `doctor` nennt den Befehl.
-- **`bin/` liegt auf dem PATH des Bash-Tools**, solange das Plugin aktiv ist
-  (plugins-reference, geprüft 2026-09-26): Das Modell kann `loadguard status`
-  selbst aufrufen. Ausgabe deshalb kurz, `label: wert`, nur ASCII.
-- **`doctor`** prüft Stufe 1 so, wie `confine()` sie sieht (`cgroup`,
+- **The decision exists once, in the C binary.** It has two report modes,
+  one JSON line on stdout each, read-only: `loadguard-hook --report`
+  (limits, memory PSI full/some, swap, zram, slots with holders,
+  `refuse_heavy`; reads no stdin) and `loadguard-hook --explain`
+  (hook payload on stdin; `decision`, `reason` verbatim, plus what was
+  measured). Both call `objection()` and `no_room()`, the functions of the
+  hook path; a `struct verdict` records how far they got. The
+  CLI only formats: it classifies no command, scans no `/proc` and
+  compares no value with a limit. Test `test_explain_is_the_hook`:
+  4 roots × 5 environments × 8 commands, decision and reason as `decide`,
+  byte for byte.
+- **Hook mode unchanged:** every call other than exactly `--report` or
+  `--explain` is the hook as before; `hooks/loadguard` starts without
+  arguments. Measured (1500 calls each, alternating against HEAD, `nice`):
+  light 0.609 → 0.605 ms, heavy with scan 4.002 → 4.003 ms median.
+- **No root in the production binary:** `report ROOT`/`explain ROOT` exist
+  only in the test driver; that is how the formatting is tested on fixtures.
+- **Invalid env values:** the report names set variables that change
+  nothing (`ignored`) — limits that `env_int` rejects (the same check as
+  the hook), and `LOADGUARD_THROTTLE` ≠ `0`. The stage 1 variables are checked by
+  `doctor` with `confine.env_int`.
+- **`status` does not scan under pressure**, like the hook: the slot line says
+  that nothing was read and why (reading cmdline can wait for swap);
+  pressure alone refuses. That keeps `status` fast during thrash. In addition the
+  CLI waits at most 10 s for the binary and after that not for it to finish — a
+  reader waiting for swap does not die immediately.
+- **Which binary:** `$CLAUDE_PLUGIN_DATA` if set — according to the
+  plugins reference, hooks get it, the Bash tool does not. Otherwise, for an
+  installed copy (`<plugins>/cache/<marketplace>/<plugin>/<version>/`),
+  its data directory `<plugins>/data/<id>`, id `<plugin>@<marketplace>`
+  with everything outside `[A-Za-z0-9_-]` as `-` (reuben: `loadguard-getty`). In the
+  checkout `build/` (make), without a build the data directory of a
+  `--plugin-dir` session (`loadguard@inline` → `loadguard-inline`). No glob
+  `loadguard-*`: on reuben `loadguard-getty` and `loadguard-inline` sit
+  side by side, with binaries of different versions. Without a binary
+  `status`/`explain` say clearly: pass-through, nothing is refused. A binary
+  without report mode (older sources) → a hint, exit 1. The CLI never builds;
+  `doctor` names the command.
+- **`bin/` is on the Bash tool's PATH** while the plugin is active
+  (plugins reference, checked 2026-09-26): the model can call `loadguard status`
+  itself. Output is therefore short, `label: value`, ASCII only.
+- **`doctor`** checks stage 1 the way `confine()` sees it (`cgroup`,
   `user_bus`, `find_busctl`, `delegated`, `lingering`, `limits`;
-  `user_bus`/`find_busctl`/`disabled` dafür aus `confine()` herausgezogen),
-  dazu ob diese Session in einem `loadguard-*.scope` liegt; Stufe 2/3: Binary
-  da, aktuell (`build.current`: Stempel gegen die Quellen neben der CLI),
-  Compiler, Report-Modus, Grenzen. Exit 1 bei jedem FAIL: Voraussetzung fehlt,
-  Binary fehlt/veraltet/ohne Report, Session nicht eingesperrt obwohl es
-  ginge, ignorierte Env-Werte. Bewusst ausgeschaltet (`=0`) ist kein Fehler.
-  Die Karte nannte `systemd-run` — seit k3 ist es `busctl`.
-- **Kosten der CLI** (reuben): `status`/`explain` ~47 ms, `doctor` ~80 ms,
-  fast nur Python-Start. Das Binary allein: `--report` ~4 ms mit Scan.
+  `user_bus`/`find_busctl`/`disabled` pulled out of `confine()` for that),
+  plus whether this session sits in a `loadguard-*.scope`; stage 2/3: binary
+  present, current (`build.current`: stamp against the sources next to the CLI),
+  compiler, report mode, limits. Exit 1 on every FAIL: prerequisite missing,
+  binary missing/stale/without report, session not confined although it
+  could be, ignored env values. Deliberately switched off (`=0`) is not an error.
+  The card named `systemd-run` — since k3 it is `busctl`.
+- **Cost of the CLI** (reuben): `status`/`explain` ~47 ms, `doctor` ~80 ms,
+  almost all Python startup. The binary alone: `--report` ~4 ms with scan.
 
 ### Codex (k11)
 
-Dasselbe Plugin für Codex (`codex-cli 0.153.4` auf reuben), nachgelesen in
-den Quellen `rust-v0.153.4` (codex-rs, Pfade unten relativ dazu). Getty
-2026-09-26: Macht Codex echte Probleme, bleibt es draußen.
+The same plugin for Codex (`codex-cli 0.153.4` on reuben), checked against
+the sources `rust-v0.153.4` (codex-rs, paths below relative to it). Getty
+2026-09-26: if Codex causes real problems, it stays out.
 
-Umgesetzt (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
-`src/loadguard-hook.c`; Tests `t/test_hook_passthrough.py` `CodexRuns`,
+Implemented (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
+`src/loadguard-hook.c`; tests `t/test_hook_passthrough.py` `CodexRuns`,
 `PluginWiring`, `t/test_confine.py`, `t/test_throttle.py`
-`CodexPayloads`, Fixtures `t/fixtures/codex/`,
+`CodexPayloads`, fixtures `t/fixtures/codex/`,
 `t/fixtures/procs/codex-*.json`):
 
-- **Ein `hooks/hooks.json` für beide**, wie bei `~/dev/briefing`.
-  `.codex-plugin/plugin.json` hat dieselben Felder wie
-  `.claude-plugin/plugin.json` plus `hooks: "./hooks/hooks.json"`, keine
-  Skills; ein Test verlangt jedes gemeinsame Feld gleich, damit ein Release
-  nicht nur eine Version hebt. Codex liest die Datei mit
-  `deny_unknown_fields` nur auf oberster Ebene (`description`, `hooks`;
-  `config/src/hook_config.rs:10-17`), ein Handler ignoriert Unbekanntes —
-  auch Claude Codes `args` (161-185). Timeout-Default wäre 600 s
-  (`hooks/src/engine/discovery.rs:762`); wir setzen 5/10.
-- **Wie Codex einen Hook startet:** `${PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`,
-  `${PLUGIN_DATA}`, `${CLAUDE_PLUGIN_DATA}` werden im Befehlstext ersetzt
-  und in die Umgebung gesetzt (`discovery.rs:262-270, 566-568`), dann
-  `<Session-Shell> -c <Befehl>` (`core/src/session/mod.rs:4666`,
-  `hooks/src/engine/command_runner.rs:390-426`), Umgebung = die von codex
-  selbst (`hooks/src/registry.rs:77`). Ohne `args` finden alle drei
-  Einträge das Datenverzeichnis über `$CLAUDE_PLUGIN_DATA`; `CodexRuns`
-  startet jeden Eintrag genau so. Hooks laufen nicht in der Sandbox (von
-  codex selbst gestartet, eigene Prozessgruppe, `command_runner.rs:216-242`)
-  — busctl erreicht den User-Bus.
-  Datenverzeichnis `~/.codex/plugins/data/<plugin>-<marketplace>`
-  (`core-plugins/src/store.rs:141`) = derselbe Name wie bei Claude Code
-  (`loadguard-getty`): `bin/loadguard` findet das Binary über den
-  Installationspfad.
-- **Ereignisse:** SessionStart kommt beim ersten Turn, vor
-  UserPromptSubmit (`core/src/session/turn.rs:264-268`); gespawnte
-  Subagenten bekommen SubagentStart statt SessionStart
-  (`core/src/hook_runtime.rs:130-146`) — ihr PreToolUse trägt
-  `agent_id`/`agent_type`. Das Shell-Tool (`exec_command`) erreicht
-  PreToolUse als `tool_name: "Bash"`, `tool_input: {"command": …}` ohne
-  weitere Felder (`core/src/tools/handlers/unified_exec/exec_command.rs:504-515`).
-  Deny-JSON und `additionalContext` sind die Claude-Code-Formen; die
-  Ausgabe-Structs lehnen unbekannte Felder ab (`hooks/src/schema.rs`), also
-  nur `hookSpecificOutput` (schon seit k6). Exit ≠ 0 außer 2 und ein
-  Timeout blockieren bei Codex nicht, sie erscheinen als Hook-Fehler
+- **One `hooks/hooks.json` for both**, as in `~/dev/briefing`.
+  `.codex-plugin/plugin.json` has the same fields as
+  `.claude-plugin/plugin.json` plus `hooks: "./hooks/hooks.json"`, no
+  skills; a test requires every shared field to be equal, so a release
+  does not bump only one version. Codex reads the file with
+  `deny_unknown_fields` only at the top level (`description`, `hooks`;
+  `config/src/hook_config.rs:10-17`), a handler ignores unknown fields —
+  including Claude Code's `args` (161-185). The timeout default would be 600 s
+  (`hooks/src/engine/discovery.rs:762`); we set 5/10.
+- **How Codex starts a hook:** `${PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`,
+  `${PLUGIN_DATA}`, `${CLAUDE_PLUGIN_DATA}` are substituted in the command text
+  and set in the environment (`discovery.rs:262-270, 566-568`), then
+  `<session shell> -c <command>` (`core/src/session/mod.rs:4666`,
+  `hooks/src/engine/command_runner.rs:390-426`), environment = that of codex
+  itself (`hooks/src/registry.rs:77`). Without `args` all three
+  entries find the data directory via `$CLAUDE_PLUGIN_DATA`; `CodexRuns`
+  starts every entry exactly that way. Hooks do not run in the sandbox (started by
+  codex itself, own process group, `command_runner.rs:216-242`)
+  — busctl reaches the user bus.
+  Data directory `~/.codex/plugins/data/<plugin>-<marketplace>`
+  (`core-plugins/src/store.rs:141`) = the same name as with Claude Code
+  (`loadguard-getty`): `bin/loadguard` finds the binary via the
+  installation path.
+- **Events:** SessionStart arrives on the first turn, before
+  UserPromptSubmit (`core/src/session/turn.rs:264-268`); spawned
+  subagents get SubagentStart instead of SessionStart
+  (`core/src/hook_runtime.rs:130-146`) — their PreToolUse carries
+  `agent_id`/`agent_type`. The shell tool (`exec_command`) reaches
+  PreToolUse as `tool_name: "Bash"`, `tool_input: {"command": …}` without
+  further fields (`core/src/tools/handlers/unified_exec/exec_command.rs:504-515`).
+  Deny JSON and `additionalContext` are the Claude Code forms; the
+  output structs reject unknown fields (`hooks/src/schema.rs`), so
+  only `hookSpecificOutput` (already since k6). Exit ≠ 0 other than 2, and a
+  timeout, do not block in Codex; they appear as hook errors
   (`hooks/src/events/pre_tool_use.rs:278-291`, `command_runner.rs:317-327`)
-  — fail-open wie bei Claude Code. `CodexPayloads`: für
-  jede Wurzel, Umgebung und jeden Befehl dieselben Bytes wie mit dem
-  Claude-Code-Payload, Deny wie Kontextzeile.
-- **Einsperren:** Sessionprozess ist der nächste Vorfahr mit `comm` oder
-  `argv[0]` `claude` **oder `codex`** (`session_name()`,
-  `find_session()`; npm-Start: node → `vendor/<triple>/bin/codex`, der
-  zählt). Name, Slice und Idempotenz wie bisher; die Unit-Beschreibung
-  nennt den Harness (`loadguard: codex session <id>`), das Statuswort heißt
-  `no-session`, die CLI „not run from a Claude Code or Codex session".
-  `codex exec` hostet seine Session immer im eigenen Prozess
-  (`exec/src/lib.rs:812`), die TUI eingebettet
-  (`tui/src/lib.rs:255-282`) — **außer** ein lokaler App-Server-Daemon
-  antwortet binnen 50 ms auf seinem Socket und der Start hat keine
-  Overrides wie `-c` (`tui/src/lib.rs:447-470, 860-929`). Der Daemon
-  (`codex app-server [--remote-control] --listen unix://`, per `setsid`
-  abgelöst, `app-server-daemon/src/backend/pid.rs:156-182, 413-421`;
-  ebenso der `codex app-server` der VS-Code-Extension,
-  `app-server/README.md:3`) hostet viele Threads in einem
-  Prozess und startet ihre Hooks. **Entschieden: ein gemeinsamer Scope, kein
-  Überspringen.** Der erste Thread schiebt den Daemon in
-  `loadguard-<thread>-<pid>.scope`, alle weiteren finden ihn dort
-  („already") und teilen das Limit — dieselbe Regel wie bei verschachteltem
-  `claude -p`. Das ist nie schwächer als ein Scope pro Session; Überspringen
-  ließe genau diese Sessions ganz ohne Grenze laufen und ihre Befehle
-  außerhalb der Slice, also auch für die Slot-Zählung unsichtbar. Preis:
-  Threads verschiedener Projekte bremsen einander bei `MemoryHigh`, der
-  Scope trägt den Namen des ersten Threads und lebt so lange wie der
-  Daemon. Auf reuben war Remote Control schon einmal an
-  (`~/.codex/app-server-daemon/settings.json`), der Daemon lief am
-  2026-09-26 nicht.
-- **Schwer (eingehend):** `codex exec` und sein Alias `codex e`
-  (`codex --help`) sind wie `claude -p`/`--bg` eine neue Headless-Session:
-  schwer beim Start, kein Slot. Gesucht wird das Wort irgendwo nach
-  `codex`, wie `-p` bei claude — Codex nimmt globale Optionen vor dem
-  Unterbefehl (`codex -m o3 exec …`). Die Art heißt jetzt `K_AGENT`; ihr Rat
-  nennt beide: „Do not start new `claude -p`/`claude --bg` or `codex exec`
-  sessions now; do the work in this one." Die Kontextzeile bleibt: Sie
-  steht mit 216 Zeichen genau an ihrer Grenze (`test_line_stays_short`),
-  „, codex exec" passt nicht hinein; verweigert wird es trotzdem.
-- **Schwer (laufend):** Codex führt Befehle auf reuben (`workspace-write`,
-  kein System-bwrap) so aus: codex → `codex-linux-sandbox` (Symlink auf
-  codex, `comm` `codex-linux-san`) → gebündeltes `bwrap` (per
-  `/proc/self/fd/N` gestartet, `comm` ist die Zahl) → wieder
-  `codex-linux-sandbox` als PID 1 der neuen Namespaces (`comm` `codex`) →
-  `/bin/bash -c <cmd>` → prove. Kein cgroup-Namespace: alles liegt im
-  Scope. Die Helfer haben den Befehl erst hinter `--` in argv; beurteilt
-  wird argv[0] — sie sind leicht und verdecken nichts
-  (`codex-session.json`, Belegstellen in `t/fixtures/README.md`). `bash
-  -lc` (vor dem Shell-Snapshot) ist kein erkannter Inline-Code-Schalter:
-  Der Codetext wird wie ein Skriptpfad beurteilt und ist nur als nacktes
-  `prove` schwer — dann hält die Shell statt prove denselben einen Slot.
-- **Kosmetik, gelassen (bis k14):** Codex hängt an den Grund `. Command: <cmd>`
-  (`core/src/hook_runtime.rs:229-234`); unser Grund endet mit `.`, das
-  Modell liest `run..`. Ändern hieße, Claude Codes Bytes zu ändern oder den
-  Harness zu erkennen — nicht trivial genug. Seit k14 erkennt der Hook den
-  Harness (unten).
-- **Grenzen:** Codex legt das `bin/` eines Plugins nicht auf den PATH der
-  Shell (nur Paket- und zsh-Pfad, `core/src/tools/runtimes/mod.rs:118-144`)
-  — `loadguard status` in der Kontextzeile fand ein Codex-Modell nicht
-  unter diesem Namen (seit k14 nennt die Zeile es unter Codex nicht mehr).
-  In der Sandbox ist `/proc` das des eigenen
-  PID-Namespace (`--proc /proc`): `status`/`explain` von dort sehen nur die
-  eigenen Prozesse; vom Terminal aus aufrufen. Hooks laufen erst nach dem
-  Trust-Prompt, pro Handler, und eine geänderte hooks.json verlangt neuen
-  Trust (`discovery.rs:676-725, 794-812`); `codex exec` kann ihn nicht
-  erteilen.
-- **Live bestätigt (2026-09-27)** mit Getty: codex-cli 0.153.4, loadguard
-  0.2.0 aus dem Marketplace `getty-dev`, `LOADGUARD_PSI_FULL=1
-  LOADGUARD_SWAP_USED=1`, damit die ruhige Lage als Druck gilt — ohne Last.
-  Belege im Rollout der Session
+  — fail-open as with Claude Code. `CodexPayloads`: for
+  every root, environment and command the same bytes as with the
+  Claude Code payload, deny as well as context line.
+- **Confinement:** the session process is the nearest ancestor with `comm` or
+  `argv[0]` `claude` **or `codex`** (`session_name()`,
+  `find_session()`; npm start: node → `vendor/<triple>/bin/codex`, that one
+  counts). Name, slice and idempotence as before; the unit description
+  names the harness (`loadguard: codex session <id>`), the status word is
+  `no-session`, the CLI says "not run from a Claude Code or Codex session".
+  `codex exec` always hosts its session in its own process
+  (`exec/src/lib.rs:812`), the TUI embedded
+  (`tui/src/lib.rs:255-282`) — **unless** a local app-server daemon
+  answers on its socket within 50 ms and the start has no
+  overrides such as `-c` (`tui/src/lib.rs:447-470, 860-929`). The daemon
+  (`codex app-server [--remote-control] --listen unix://`, detached via `setsid`,
+  `app-server-daemon/src/backend/pid.rs:156-182, 413-421`;
+  likewise the `codex app-server` of the VS Code extension,
+  `app-server/README.md:3`) hosts many threads in one
+  process and starts their hooks. **Decided: one shared scope, no
+  skipping.** The first thread moves the daemon into
+  `loadguard-<thread>-<pid>.scope`, all further ones find it there
+  ("already") and share the limit — the same rule as for nested
+  `claude -p`. That is never weaker than one scope per session; skipping
+  would let exactly these sessions run with no limit at all and their commands
+  outside the slice, so invisible to the slot count too. The price:
+  threads of different projects slow each other down at `MemoryHigh`, the
+  scope carries the name of the first thread and lives as long as the
+  daemon. On reuben Remote Control had been on once
+  (`~/.codex/app-server-daemon/settings.json`), the daemon was not running on
+  2026-09-26.
+- **Heavy (incoming):** `codex exec` and its alias `codex e`
+  (`codex --help`) are, like `claude -p`/`--bg`, a new headless session:
+  heavy at start, no slot. The word is searched for anywhere after
+  `codex`, like `-p` with claude — Codex takes global options before the
+  subcommand (`codex -m o3 exec …`). The kind is now called `K_AGENT`; its advice
+  names both: "Do not start new `claude -p`/`claude --bg` or `codex exec`
+  sessions now; do the work in this one." The context line stays: at
+  216 characters it sits exactly at its limit (`test_line_stays_short`),
+  ", codex exec" does not fit; it is refused anyway.
+- **Heavy (running):** Codex executes commands on reuben (`workspace-write`,
+  no system bwrap) like this: codex → `codex-linux-sandbox` (symlink to
+  codex, `comm` `codex-linux-san`) → bundled `bwrap` (started via
+  `/proc/self/fd/N`, `comm` is the number) → `codex-linux-sandbox` again
+  as PID 1 of the new namespaces (`comm` `codex`) →
+  `/bin/bash -c <cmd>` → prove. No cgroup namespace: everything sits in the
+  scope. The helpers have the command in argv only after `--`; what is judged
+  is argv[0] — they are light and hide nothing
+  (`codex-session.json`, source references in `t/fixtures/README.md`). `bash
+  -lc` (before the shell snapshot) is not a recognized inline-code switch:
+  the code text is judged like a script path and is heavy only as a bare
+  `prove` — then the shell holds the same single slot instead of prove.
+- **Cosmetics, left alone (until k14):** Codex appends `. Command: <cmd>` to the reason
+  (`core/src/hook_runtime.rs:229-234`); our reason ends with `.`, the
+  model reads `run..`. Changing that would mean changing Claude Code's bytes or detecting the
+  harness — not trivial enough. Since k14 the hook detects the
+  harness (below).
+- **Limits:** Codex does not put a plugin's `bin/` on the shell's PATH
+  (only package and zsh paths, `core/src/tools/runtimes/mod.rs:118-144`)
+  — a Codex model did not find `loadguard status` from the context line
+  under that name (since k14 the line no longer names it under Codex).
+  In the sandbox `/proc` is that of its own
+  PID namespace (`--proc /proc`): `status`/`explain` from there see only their
+  own processes; call them from the terminal. Hooks run only after the
+  trust prompt, per handler, and a changed hooks.json requires new
+  trust (`discovery.rs:676-725, 794-812`); `codex exec` cannot
+  grant it.
+- **Confirmed live (2026-09-27)** with Getty: codex-cli 0.153.4, loadguard
+  0.2.0 from the marketplace `getty-dev`, `LOADGUARD_PSI_FULL=1
+  LOADGUARD_SWAP_USED=1`, so that the quiet state counts as pressure — without load.
+  Evidence in the session's rollout
   (`~/.codex/sessions/2026/09/27/rollout-2026-09-27T02-13-01-01a0e035-….jsonl`):
-  - Einsperren: codex (pid 352696) in `loadguard-01a0e035-352696.scope`,
-    Beschreibung `loadguard: codex session 01a0e035-…`.
-  - Erster Prompt direkt nach der Installation: keine Kontextzeile
-    (SessionStart und UserPromptSubmit 02:13:04, Binary erst 02:13:07
-    gebaut), kein Beobachter in dieser Session (confine lief vor dem Build)
-    — wie für die erste Session beschrieben (Lernliste, Stufe 4).
-    PreToolUse griff um 02:13:09 schon.
-  - Zweiter Prompt: die Kontextzeile kommt als developer-Nachricht an;
-    `git status` läuft, `make test` und `codex exec` werden verweigert, der
-    Grund mit angehängtem `. Command: <cmd>` — das `..` von oben (k14).
-  - Codex rief die Befehle über code mode auf (`exec` →
-    `tools.exec_command({cmd: …})`); der Hook griff trotzdem.
-  - Shell: `sleep 45; echo "lg probe" 'x'` lief als `/bin/bash -c <cmd>`,
-    argv[2] Byte für Byte der `cmd` des Modells
-    (`t/fixtures/shells/codex.json`); der Rollout nennt den Aufruf
-    `/bin/bash -lc <cmd>`, die Form vor dem Snapshot-Skript. bash blieb
-    (`;`-Liste), `sleep` als Kind.
-  - Kette im Scope wie aus den Quellen rekonstruiert: codex →
+  - Confinement: codex (pid 352696) in `loadguard-01a0e035-352696.scope`,
+    description `loadguard: codex session 01a0e035-…`.
+  - First prompt right after installation: no context line
+    (SessionStart and UserPromptSubmit 02:13:04, binary only built at 02:13:07),
+    no watcher in this session (confine ran before the build)
+    — as described for the first session (learned list, stage 4).
+    PreToolUse already took effect at 02:13:09.
+  - Second prompt: the context line arrives as a developer message;
+    `git status` runs, `make test` and `codex exec` are refused, the
+    reason with `. Command: <cmd>` appended — the `..` from above (k14).
+  - Codex called the commands via code mode (`exec` →
+    `tools.exec_command({cmd: …})`); the hook took effect anyway.
+  - Shell: `sleep 45; echo "lg probe" 'x'` ran as `/bin/bash -c <cmd>`,
+    argv[2] byte for byte the model's `cmd`
+    (`t/fixtures/shells/codex.json`); the rollout names the call
+    `/bin/bash -lc <cmd>`, the form before the snapshot script. bash stayed
+    (`;` list), `sleep` as a child.
+  - Chain in the scope as reconstructed from the sources: codex →
     `codex-linux-sandbox` (argv[0]
     `~/.codex/tmp/arg0/codex-arg0XXXX/codex-linux-sandbox`,
     `--sandbox-policy-cwd … --command-cwd …`) → bwrap (`comm` `3`,
     `bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / …`) →
     `codex-linux-sandbox` (`comm` `codex`) → `/bin/bash -c <cmd>` →
-    `sleep 45`; daneben `codex-code-mode-host` und ein MCP-Server
-    (`python3 -I -c …`). `procs/codex-session.json` folgt dem (k16).
-  - Danach der Eintrag in `.agents/plugins/marketplace.json` von
+    `sleep 45`; alongside `codex-code-mode-host` and an MCP server
+    (`python3 -I -c …`). `procs/codex-session.json` follows that (k16).
+  - Then the entry in `.agents/plugins/marketplace.json` of
     `Getty/marketplace` (cbdd3af): `codex plugin add loadguard@getty`.
 
-### Umgesetzt (k14): Codex-Nachzügler
+### Implemented (k14): Codex stragglers
 
 `src/loadguard-hook.c` (`CODEX_HEADLESS`, `advice()`, `from_codex()`,
-`objection()`, `situation()`); Tests `t/test_throttle.py` `CodexPayloads`
-(umgestellt), `Decide`, `Slots`, `Matcher`, `t/test_learn.py` `Hook`.
-Quellen: codex-rs `rust-v0.153.4`.
+`objection()`, `situation()`); tests `t/test_throttle.py` `CodexPayloads`
+(reworked), `Decide`, `Slots`, `Matcher`, `t/test_learn.py` `Hook`.
+Sources: codex-rs `rust-v0.153.4`.
 
-- **`codex review` ist schwer** wie `codex exec`: Es ist `exec` mit einem
-  Review-Auftrag im eigenen Prozess (`cli/src/main.rs:136-141, 1160-1174`:
-  `ExecCli` mit `ExecCommand::Review`, `codex_exec::run_main`), ohne Alias.
-  `K_AGENT`, hält keinen Slot; gesucht wird das Wort wie `exec` irgendwo
-  nach `codex`. Der Rat nennt es mit: „Do not start new `claude -p`/`claude
+- **`codex review` is heavy** like `codex exec`: it is `exec` with a
+  review task in its own process (`cli/src/main.rs:136-141, 1160-1174`:
+  `ExecCli` with `ExecCommand::Review`, `codex_exec::run_main`), without an alias.
+  `K_AGENT`, holds no slot; the word is searched for like `exec` anywhere
+  after `codex`. The advice names it too: "Do not start new `claude -p`/`claude
   --bg` or `codex exec`/`codex review` sessions now; do the work in this
-  one." Die Kontextzeile nennt weiter nur `claude -p/--bg` (216 Zeichen).
-- **Harness erkennen, Claude Codes Bytes unverändert.** Unter Codex endet
-  (a) der Grund ohne Schlusspunkt — Codex hängt `. Command: <cmd>` an
-  (`core/src/hook_runtime.rs:229-234`), das Modell las live `run..` —, und
-  (b) fehlt der Kontextzeile „; see `loadguard status`": kein Plugin-`bin/`
-  auf dem PATH, in der Sandbox zeigt `/proc` nur die Sandbox. Entscheidung
-  und alles andere bleiben gleich; `--explain` schreibt den Grund wie der
-  Hook für dasselbe Payload.
-- **Signal** (`from_codex()`, kein Dateizugriff: eine Schlüsselsuche im
-  schon geparsten Payload, auf SessionStart zwei `getenv`):
-  - PreToolUse, UserPromptSubmit: `turn_id` als String im Payload. Codex
-    setzt es auf allen turn-bezogenen Eingaben als Pflichtfeld („Codex
-    extension", `hooks/src/schema.rs:280-281, 569-570`, Test
+  one." The context line still names only `claude -p/--bg` (216 characters).
+- **Detect the harness, Claude Code's bytes unchanged.** Under Codex
+  (a) the reason ends without a final period — Codex appends `. Command: <cmd>`
+  (`core/src/hook_runtime.rs:229-234`), the model read `run..` live —, and
+  (b) the context line lacks "; see `loadguard status`": no plugin `bin/`
+  on the PATH, in the sandbox `/proc` shows only the sandbox. The decision
+  and everything else stay the same; `--explain` writes the reason as the
+  hook does for the same payload.
+- **Signal** (`from_codex()`, no file access: a key lookup in the
+  already parsed payload, on SessionStart two `getenv`):
+  - PreToolUse, UserPromptSubmit: `turn_id` as a string in the payload. Codex
+    sets it on all turn-scoped inputs as a required field ("Codex
+    extension", `hooks/src/schema.rs:280-281, 569-570`, test
     `turn_scoped_hook_inputs_include_codex_turn_id_extension`, 1101-1170);
-    Claude Codes PreToolUse und UserPromptSubmit haben keins (aufgezeichnet
-    k7, hooks-Doku gelesen 2026-09-27).
-  - SessionStart: `SessionStartCommandInput` hat kein `turn_id` und kein
-    Feld, das Claude Code nicht auch schickt (`schema.rs:499-510`:
+    Claude Code's PreToolUse and UserPromptSubmit have none (recorded
+    k7, hooks docs read 2026-09-27).
+  - SessionStart: `SessionStartCommandInput` has no `turn_id` and no
+    field Claude Code does not send too (`schema.rs:499-510`:
     `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
-    `permission_mode`, `source`). Deshalb die Umgebung: Codex setzt jedem
-    Hook eines Plugins `PLUGIN_ROOT` und `CLAUDE_PLUGIN_ROOT` auf denselben
-    Pfad (`hooks/src/engine/discovery.rs:262-270`) und scrubbt sie nicht
-    (`protocol/src/shell_environment.rs:14-50`); Claude Code exportiert
+    `permission_mode`, `source`). Hence the environment: Codex sets
+    `PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT` to the same path for every hook of a plugin
+    (`hooks/src/engine/discovery.rs:262-270`) and does not scrub them
+    (`protocol/src/shell_environment.rs:14-50`); Claude Code exports
     `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`
-    (hooks-Doku), kein `PLUGIN_ROOT`. Unter Codex läuft loadguard nur als
-    Plugin (sonst findet der Starter kein `$CLAUDE_PLUGIN_DATA`), das Signal
-    fehlt dort also nie. Gleichheit statt bloßem Vorhandensein: Claude Codes
-    Hooks erben Claudes Umgebung, ein `PLUGIN_ROOT` eines anderen Werkzeugs
-    darin zählt nicht.
-  - Verworfen: `transcript_path` (`~/.codex/sessions/…/rollout-*`, darf
-    `null` sein, hängt an `CODEX_HOME`), UUIDv7 der `session_id`,
-    `model`-Namen — Konventionen, keine Zusagen; `CODEX_THREAD_ID` erbt
-    jede Shell von Codex, also auch ein darin gestartetes `claude`.
-  - Ohne Signal gilt Claude Codes Form, wie bis k14. Ein falscher Treffer
-    kostet einen Punkt oder den Hinweis, nie eine Entscheidung.
-  - **Risiko:** Claude Code kennt `turn_id` schon (Eingabe von
-    MessageDisplay, hooks-Doku 2026-09-27). Bekommt auch sein PreToolUse
-    eins, verliert Claude Codes Grund den Punkt — dann auf das
-    Umgebungssignal für alle Ereignisse wechseln.
-- **Grenzen, dokumentiert statt gebaut** (Getty: der exakte Text, keine
-  Rekonstruktion aus argv): ein einzelner Befehl ist unter Codex nicht
-  lernbar (bash `exec`, k15); ein unter Claude Code gelernter wird unter
-  Codex beim Eintritt verweigert, hält laufend aber keinen Slot (Lernliste,
-  Grenzen); Claude Codes zsh-Wrapper bleibt unaufgezeichnet, zsh fehlt auf
+    (hooks docs), no `PLUGIN_ROOT`. Under Codex loadguard only runs as a
+    plugin (otherwise the launcher finds no `$CLAUDE_PLUGIN_DATA`), so the signal
+    is never missing there. Equality rather than mere presence: Claude Code's
+    hooks inherit Claude's environment, and a `PLUGIN_ROOT` of another tool
+    in it does not count.
+  - Rejected: `transcript_path` (`~/.codex/sessions/…/rollout-*`, may be
+    `null`, depends on `CODEX_HOME`), the UUIDv7 of the `session_id`,
+    `model` names — conventions, not promises; `CODEX_THREAD_ID` is inherited by
+    every shell from Codex, including a `claude` started in it.
+  - Without the signal Claude Code's form applies, as until k14. A false match
+    costs a period or the hint, never a decision.
+  - **Risk:** Claude Code already knows `turn_id` (input of
+    MessageDisplay, hooks docs 2026-09-27). If its PreToolUse gets
+    one too, Claude Code's reason loses the period — then switch to the
+    environment signal for all events.
+- **Limits, documented instead of built** (Getty: the exact text, no
+  reconstruction from argv): a single command cannot be learned under Codex
+  (bash `exec`, k15); one learned under Claude Code is refused under
+  Codex on entry, but holds no slot while running (learned list,
+  limits); Claude Code's zsh wrapper stays unrecorded, zsh is missing on
   reuben.
-- **Kosten** (reuben, 313 Prozesse, je 1500 leichte und 500 schwere Läufe,
-  alle vier Fälle je Durchgang verschränkt, HEAD und neu abwechselnd,
-  `nice`, Prozessstart inklusive; Median/p90 in ms): leicht Claude
-  0,502/0,650 → 0,501/0,660, leicht Codex 0,504/0,657 → 0,504/0,651; schwer
-  mit Scan Claude 4,735/5,724 → 4,733/5,916, Codex 4,749/5,880 →
-  4,739/5,831. Kein messbarer Unterschied.
-- **Geprüft:** HEAD- gegen neuen Testtreiber, 6780 Läufe (alle Muster- und
-  leichten Befehle der Tests, synthetisches und aufgezeichnetes
-  Claude-Payload, beide Kontextereignisse, drei Wurzeln, fünf Umgebungen
-  samt Claude Codes, `decide` und `explain`): Unterschiede nur bei
-  `K_AGENT`-Befehlen (Rat) und bei `codex review` (neu schwer).
+- **Cost** (reuben, 313 processes, 1500 light and 500 heavy runs each,
+  all four cases interleaved per pass, HEAD and new alternating,
+  `nice`, process start included; median/p90 in ms): light Claude
+  0.502/0.650 → 0.501/0.660, light Codex 0.504/0.657 → 0.504/0.651; heavy
+  with scan Claude 4.735/5.724 → 4.733/5.916, Codex 4.749/5.880 →
+  4.739/5.831. No measurable difference.
+- **Checked:** HEAD against the new test driver, 6780 runs (all pattern and
+  light commands of the tests, synthetic and recorded
+  Claude payload, both context events, three roots, five environments
+  including Claude Code's, `decide` and `explain`): differences only for
+  `K_AGENT` commands (advice) and for `codex review` (newly heavy).
 
-## Nicht-Ziele
+## Non-goals
 
-- Kein Ersatz für `earlyoom` (läuft auf reuben) — loadguard verhindert, dass es so
-  weit kommt; earlyoom bleibt die letzte Leitplanke.
-- Keine Kontrolle über Prozesse außerhalb von Claude-Code-Sessions (podman-Runs
-  anderer Tools). perlbench-Container brauchen eigene `--memory`-Limits
-  — separates Ticket, kein Hook-Thema.
-- Kein Telemetrie-Versand. Alles lokal.
+- No replacement for `earlyoom` (runs on reuben) — loadguard keeps things from getting
+  that far; earlyoom stays the last guardrail.
+- No control over processes outside Claude Code sessions (podman runs
+  of other tools). perlbench containers need their own `--memory` limits
+  — a separate ticket, not a hook topic.
+- No telemetry upload. Everything is local.
 
-## Kalibrierung
+## Calibration
 
-Schwellwerte gegen `~/load-incidents` ableiten: Welche PSI-Werte standen in den
-Snapshots *vor* dem Kipp-Punkt? Konfigurierbar per Env/Config-Datei, Defaults
-konservativ für 8 GB / 4 Cores.
+Derive thresholds from `~/load-incidents`: which PSI values were in the
+snapshots *before* the tipping point? Configurable via env/config file, defaults
+conservative for 8 GB / 4 cores.
 
-## Lieferung
+## Delivery
 
-Eigenes Repo, später Eintrag in `~/dev/marketplace` (`Getty/marketplace`), analog
-`briefing`. Hook-Laufzeit im Normalfall < 30 ms (er läuft vor **jedem** Bash-Aufruf
-aller Sessions).
+A repo of its own, later an entry in `~/dev/marketplace` (`Getty/marketplace`), like
+`briefing`. Hook runtime normally < 30 ms (it runs before **every** Bash call
+of all sessions).
 
-### Sprache und Build (entschieden 2026-09-26)
+### Language and build (decided 2026-09-26)
 
-Gemessen (k1): Ein Python-Hook kostet auf reuben im Median 183 ms, p90 346 ms — fast
-nur Interpreter-Start. Daher:
+Measured (k1): a Python hook costs 183 ms median on reuben, p90 346 ms — almost
+all interpreter startup. Hence:
 
-- **Hook-Pfad in C** (Payload lesen, `/proc` messen, einwickeln, entscheiden). JSON
-  über **vendored cJSON** (`vendor/cJSON/`, v1.7.19, MIT) — kein handgebautes Parsen, keine
-  `-dev`-Pakete auf dem Zielhost, nur ein C-Compiler.
-- **CLI (`status`/`doctor`/`explain`) und Tests bleiben Python** (stdlib). `explain`
-  ruft das Binary, damit die Entscheidungslogik genau einmal existiert.
-  `lib/loadguard/snapshot.py` (k2) bleibt für CLI und Tests.
-- **Build beim ersten Lauf** auf dem Zielhost. Solange kein Binary da ist (kein
-  Compiler, Build läuft noch, Build fehlgeschlagen): **fail-open Pass-through**.
-  Der Build darf nie einen Bash-Aufruf blockieren.
+- **Hook path in C** (read payload, measure `/proc`, wrap, decide). JSON
+  via **vendored cJSON** (`vendor/cJSON/`, v1.7.19, MIT) — no hand-rolled parsing, no
+  `-dev` packages on the target host, only a C compiler.
+- **CLI (`status`/`doctor`/`explain`) and tests stay Python** (stdlib). `explain`
+  calls the binary so that the decision logic exists exactly once.
+  `lib/loadguard/snapshot.py` (k2) stays for CLI and tests.
+- **Build on first run** on the target host. As long as there is no binary (no
+  compiler, build still running, build failed): **fail-open pass-through**.
+  The build must never block a Bash call.
 
-Umgesetzt (k8):
+Implemented (k8):
 
-- **Build-Ort `${CLAUDE_PLUGIN_DATA}/bin/loadguard-hook`** — laut
-  plugins-reference `~/.claude/plugins/data/<id>/`, bleibt über Plugin-Updates
-  erhalten; `${CLAUDE_PLUGIN_ROOT}` wechselt mit jeder Version. Veraltet heißt:
-  der Stempel neben dem Binary (SHA-256 über Quellen, Flags, Compiler-Pfad/-Größe/
-  -mtime) passt nicht mehr — ein Update mit geänderten Quellen baut neu, bloß
-  kopierte Dateien mit neuer mtime nicht.
-- **SessionStart** (`hooks/loadguard-build`, `async`) forkt ein abgelöstes Kind
-  (eigene Session, stdio auf `/dev/null`, `nice 10`), das unter `flock` atomar baut
-  (temp + rename, 120 s Timeout). Ohne Compiler nichts; Build fehlgeschlagen →
-  altes Binary weg → Pass-through. Abgelöst, weil `claude -p` async-Hooks beim
-  Beenden killt — sonst würde bei reinen Headless-Sessions nie fertig gebaut.
-- **PreToolUse** startet den sh-Starter `hooks/loadguard` in Exec-Form
-  (`args: ["${CLAUDE_PLUGIN_DATA}"]`): Binary da → `exec`, sonst `exit 0`. Das
-  Binary direkt einzutragen spart ~2 ms, gäbe aber bis zum ersten Build (und
-  ohne Compiler für immer) bei jedem Bash-Aufruf eine sichtbare
-  Hook-Fehlermeldung (exit 127).
-- **Der Python-Hook ist gelöscht**: ohne Binary ist Pass-through genau
-  `exit 0`, dafür braucht es keinen Interpreter für 83–183 ms.
-- **Windows: still aus** (windows-developer k6). Claude Code startet dort
-  ein Skript ohne Endung nicht (ENOENT); einen Plattform-Schalter für Hooks
-  gibt es nicht. Eine Exec-Form ohne Endung startet auf Windows aber
-  `<command>.exe`. Neben jedem der drei Skripte liegt deshalb eine Kopie von
-  `winlaunch` (`winlaunch/`, reproduzierbar mit zig gebaut, in der CI
-  nachgebaut und verglichen). Sie liest `# winlaunch:`-Zeilen aus dem Skript
-  daneben; loadguards Skripte haben keine, also endet jeder Hook mit exit 0
-  und ohne Ausgabe. Dafür läuft auch `loadguard-confine` in Exec-Form
-  (`args: []`); Codex ignoriert `args` und sieht denselben Befehlstext.
+- **Build location `${CLAUDE_PLUGIN_DATA}/bin/loadguard-hook`** — according to the
+  plugins reference `~/.claude/plugins/data/<id>/`, survives plugin updates;
+  `${CLAUDE_PLUGIN_ROOT}` changes with every version. Stale means:
+  the stamp next to the binary (SHA-256 over sources, flags, compiler path/size/
+  mtime) no longer matches — an update with changed sources rebuilds, merely
+  copied files with a new mtime do not.
+- **SessionStart** (`hooks/loadguard-build`, `async`) forks a detached child
+  (own session, stdio to `/dev/null`, `nice 10`) that builds atomically under `flock`
+  (temp + rename, 120 s timeout). Without a compiler nothing; build failed →
+  old binary gone → pass-through. Detached because `claude -p` kills async hooks on
+  exit — otherwise purely headless sessions would never finish building.
+- **PreToolUse** starts the sh launcher `hooks/loadguard` in exec form
+  (`args: ["${CLAUDE_PLUGIN_DATA}"]`): binary present → `exec`, otherwise `exit 0`.
+  Registering the binary directly would save ~2 ms, but until the first build (and
+  without a compiler forever) it would show a visible hook error message
+  (exit 127) on every Bash call.
+- **The Python hook is deleted**: without a binary, pass-through is exactly
+  `exit 0`; that needs no interpreter for 83–183 ms.
+- **Windows: silently off** (windows-developer k6). Claude Code does not start
+  a script without an extension there (ENOENT); there is no platform switch for hooks.
+  An exec form without an extension, however, starts
+  `<command>.exe` on Windows. Next to each of the three scripts there is therefore a copy of
+  `winlaunch` (`winlaunch/`, reproducibly built with zig, rebuilt and compared
+  in CI). It reads `# winlaunch:` lines from the script
+  next to it; loadguard's scripts have none, so every hook ends with exit 0
+  and no output. For that, `loadguard-confine` also runs in exec form
+  (`args: []`); Codex ignores `args` and sees the same command text.

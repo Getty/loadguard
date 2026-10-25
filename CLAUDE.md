@@ -1,42 +1,42 @@
 # loadguard — CLAUDE.md
 
-Claude-Code-Plugin, das die Last von KI-Prozessen auf dem Host misst, begrenzt und
-der KI zurückmeldet, damit sie gegensteuern kann. Entstanden aus den
-Thrash-Reboots von `reuben` (Beweise: `~/load-incidents/`).
+Claude Code plugin that measures and limits the load of AI processes on the host and
+reports it back to the AI so it can steer against it. Born out of the thrash reboots
+of `reuben` (evidence: `~/load-incidents/`).
 
-- **Design, Stufen, offene Fragen:** [`docs/design.md`](docs/design.md) — zuerst lesen.
-- **Regeln + Delegation:** gemeinsame House-Rules über das skilletor-Bundle
-  `getty-house@getty`; Lanes und Hazards in `.claude/rules/loadguard-rules.md` (auto-geladen).
-- **Board:** `karr list --compact` — die Karten folgen den Stufen aus dem Design.
+- **Design, stages, open questions:** [`docs/design.md`](docs/design.md) — read first.
+- **Rules + delegation:** shared house rules via the skilletor bundle
+  `getty-house@getty`; lanes and hazards in `.claude/rules/loadguard-rules.md` (auto-loaded).
+- **Board:** `karr list --compact` — the cards follow the stages from the design.
 
 ## Delegation
 
-| Aufgabe | Agent |
+| Task | Agent |
 |---|---|
-| Hook, CLI, Entscheidungslogik, Tests | `loadguard-worker` |
-| Commits, `Changes`, Karte → done, Release-Audit | `loadguard-release-manager` |
+| Hook, CLI, decision logic, tests | `loadguard-worker` |
+| Commits, `Changes`, card → done, release audit | `loadguard-release-manager` |
 
-Nur der Release-Manager committet. Die Agenten tragen ihre Skills über
-`briefing.skills` (`.claude/agents/`); Skill-Quellen unter `.claude/skills/`.
+Only the release-manager commits. The agents carry their skills via
+`briefing.skills` (`.claude/agents/`); skill sources under `.claude/skills/`.
 
 ## Layout
 
-| Pfad | Inhalt |
+| Path | Contents |
 |---|---|
-| `.claude-plugin/plugin.json` | Plugin-Manifest |
-| `.codex-plugin/plugin.json` | Codex-Manifest, dieselbe `hooks/hooks.json`; gemeinsame Felder per Test gleich |
-| `hooks/hooks.json` | Hook-Registrierung (SessionStart: Einsperren + Build + Lage-Zeile, UserPromptSubmit: Lage-Zeile, PreToolUse auf Bash) |
-| `hooks/loadguard` | sh-Starter für PreToolUse, UserPromptSubmit und SessionStart: `exec` des C-Binarys, ohne Binary `exit 0` |
-| `hooks/loadguard-confine` | SessionStart: schiebt die claude-Session in einen systemd-User-Scope mit Limits, startet danach den Beobachter der Lernliste |
-| `hooks/loadguard-build` | SessionStart: baut das Binary nach `${CLAUDE_PLUGIN_DATA}/bin/`, abgekoppelt |
-| `src/loadguard-hook.c` | Hook-Pfad in C (verweigert schwere Befehle unter Druck oder bei vollen Slots, Lage-Zeile nur unter Druck, sonst still; schreibt Befehle nie um; Report-Modi für die CLI; `--watch PID`: Beobachter pro Scope, schreibt die Lernliste) |
-| `vendor/cJSON/` | cJSON unverändert, Version und SHA256 in `README` |
+| `.claude-plugin/plugin.json` | Plugin manifest |
+| `.codex-plugin/plugin.json` | Codex manifest, same `hooks/hooks.json`; shared fields kept equal by a test |
+| `hooks/hooks.json` | Hook registration (SessionStart: confinement + build + status line, UserPromptSubmit: status line, PreToolUse on Bash) |
+| `hooks/loadguard` | sh launcher for PreToolUse, UserPromptSubmit and SessionStart: `exec` of the C binary, `exit 0` without a binary |
+| `hooks/loadguard-confine` | SessionStart: moves the claude session into a systemd user scope with limits, then starts the watcher of the learned list |
+| `hooks/loadguard-build` | SessionStart: builds the binary into `${CLAUDE_PLUGIN_DATA}/bin/`, detached |
+| `src/loadguard-hook.c` | Hook path in C (refuses heavy commands under pressure or when slots are full, status line only under pressure, otherwise silent; never rewrites commands; report modes for the CLI; `--watch PID`: per-scope watcher, writes the learned list) |
+| `vendor/cJSON/` | cJSON unmodified, version and SHA256 in `README` |
 | `Makefile` | `make` → `build/bin/`, `make test`, `make clean` |
 | `bin/loadguard` | CLI (`status`, `doctor`, `explain`, `learned`, `forget`) |
-| `lib/loadguard/` | Python für CLI, Build und Tests (`snapshot.py`: Messung, `build.py`: Build/Staleness, `confine.py`: Session-Scope, `learn.py`: Lernliste lesen/kürzen, Beobachter starten, `cli.py`: CLI-Ausgabe aus den Report-Modi des Binarys) |
-| `t/` | Tests (`python3 -m unittest discover -s t -v`), Fixtures aus `~/load-incidents/` |
+| `lib/loadguard/` | Python for CLI, build and tests (`snapshot.py`: measurement, `build.py`: build/staleness, `confine.py`: session scope, `learn.py`: read/trim the learned list, start the watcher, `cli.py`: CLI output from the binary's report modes) |
+| `t/` | Tests (`python3 -m unittest discover -s t -v`), fixtures from `~/load-incidents/` |
 
-Hook-Pfad in C (vendored cJSON, Build beim ersten Lauf, fail-open ohne Binary);
-CLI und Tests in Python 3, nur stdlib. Begründung: `docs/design.md` → Sprache und
-Build. `~/dev/briefing` dient als Referenz für Plugin-Aufbau, `hooks.json` und
+Hook path in C (vendored cJSON, built on first run, fail-open without a binary);
+CLI and tests in Python 3, stdlib only. Rationale: `docs/design.md` → Language and
+build. `~/dev/briefing` serves as the reference for plugin structure, `hooks.json` and
 `${CLAUDE_PLUGIN_ROOT}`.
