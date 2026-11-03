@@ -183,6 +183,8 @@ otherwise the AI could not even look at what is going on.
   next large command evicts file pages — the road into thrash before PSI shows
   it. zram appears only in the reason. Live reuben (2026-09-26): full
   0.01 %, swap 51 %, zram 98 %, 297 processes → nothing refused.
+  Snapshots added since, from the build-up or fading of an incident, lie between
+  the two bands; there threshold 10 decides, and `Calibration` checks that too.
 - **No process scan under pressure.** `/proc/<pid>/cmdline` reads the
   argument pages of the foreign process — swapped out during thrash, the reader waits for
   swap IO. A hook timeout does **not** block the command according to the docs: a slow
@@ -474,7 +476,9 @@ Implemented (k6, `src/loadguard-hook.c`, `hooks/hooks.json`; tests
   a slot frees up soon, and the deny reason says so at the moment of the
   attempt. No slot scan, so the path reads no foreign process even at rest
   (test: cmdline as a FIFO). `Calibration`: in all 54
-  snapshots thrash gets the line, quiet stays silent.
+  snapshots thrash gets the line, quiet stays silent. Snapshots from the build-up
+  or fading of an incident lie between the bands; there threshold 10 decides, and
+  `Calibration` checks that too.
 - **Same binary, same launcher:** `hook()` branches on
   `hook_event_name` — `UserPromptSubmit`/`SessionStart` → line or nothing,
   everything else → the PreToolUse path as before (also without
