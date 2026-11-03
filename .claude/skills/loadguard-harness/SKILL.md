@@ -64,8 +64,10 @@ Details and file:line: `docs/design.md` (Codex, k11).
 Verified against the codex-rs `rust-v0.153.4` sources (= `codex-cli 0.153.4`);
 details and file:line in `docs/design.md` → Codex (k11).
 
-- `.codex-plugin/plugin.json` = `.claude-plugin/plugin.json` + `hooks`; a test
-  pins every shared field (bump both versions together).
+- `.codex-plugin/plugin.json` = `.claude-plugin/plugin.json` + `version` +
+  `hooks`; a test pins every shared field. The version lives only in the Codex
+  manifest; the Claude Code manifest carries none (Claude Code takes it from
+  the commit).
 - Codex drops `args`, substitutes `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}`
   (and `PLUGIN_*`) in the command text and env, runs `<shell> -c <command>` with
   codex's own env, outside the sandbox. Every hook entry must work from

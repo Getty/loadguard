@@ -23,8 +23,8 @@ Only the release-manager commits. The agents carry their skills via
 
 | Path | Contents |
 |---|---|
-| `.claude-plugin/plugin.json` | Plugin manifest |
-| `.codex-plugin/plugin.json` | Codex manifest, same `hooks/hooks.json`; shared fields kept equal by a test |
+| `.claude-plugin/plugin.json` | Plugin manifest, no `version` (Claude Code takes it from the commit) |
+| `.codex-plugin/plugin.json` | Codex manifest, holds the version, same `hooks/hooks.json`; shared fields kept equal by a test |
 | `hooks/hooks.json` | Hook registration (SessionStart: confinement + build + status line, UserPromptSubmit: status line, PreToolUse on Bash) |
 | `hooks/loadguard` | sh launcher for PreToolUse, UserPromptSubmit and SessionStart: `exec` of the C binary, `exit 0` without a binary |
 | `hooks/loadguard-confine` | SessionStart: moves the claude session into a systemd user scope with limits, then starts the watcher of the learned list |

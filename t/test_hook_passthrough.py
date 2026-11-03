@@ -224,12 +224,14 @@ class PluginWiring(unittest.TestCase):
         with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as f:
             manifest = json.load(f)
         self.assertEqual(manifest["name"], "loadguard")
-        self.assertIn("version", manifest)
+        # The Claude Code version comes from the commit: the manifest
+        # carries none.
+        self.assertNotIn("version", manifest)
 
     def test_codex_manifest_matches(self):
-        # k11: one release, two manifests. Every field of Claude Code's has
-        # the same value in Codex's, so a version bump in one alone fails
-        # here. Codex's adds `hooks` only (like ~/dev/briefing's; codex-rs
+        # k11: two manifests. Every field of Claude Code's has the same
+        # value in Codex's. Codex's adds `version` (the only manifest that
+        # carries one) and `hooks` (like ~/dev/briefing's; codex-rs
         # core-plugins/src/manifest.rs RawPluginManifest), and no skills:
         # loadguard ships none.
         manifests = {}
@@ -239,7 +241,8 @@ class PluginWiring(unittest.TestCase):
                 manifests[harness] = json.load(f)
         claude, codex = manifests["claude"], manifests["codex"]
         self.assertEqual({k: codex.get(k) for k in claude}, claude)
-        self.assertEqual(sorted(set(codex) - set(claude)), ["hooks"])
+        self.assertEqual(sorted(set(codex) - set(claude)),
+                         ["hooks", "version"])
         self.assertEqual(codex["hooks"], "./hooks/hooks.json")
 
     def test_hooks_json_reads_under_codex(self):

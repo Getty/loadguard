@@ -607,9 +607,10 @@ Implemented (k11, `.codex-plugin/plugin.json`, `lib/loadguard/confine.py`,
 
 - **One `hooks/hooks.json` for both**, as in `~/dev/briefing`.
   `.codex-plugin/plugin.json` has the same fields as
-  `.claude-plugin/plugin.json` plus `hooks: "./hooks/hooks.json"`, no
-  skills; a test requires every shared field to be equal, so a release
-  does not bump only one version. Codex reads the file with
+  `.claude-plugin/plugin.json` plus `version` and `hooks: "./hooks/hooks.json"`,
+  no skills; a test requires every shared field to be equal. The version lives
+  in the Codex manifest only; the Claude Code manifest carries none, so Claude
+  Code takes the version from the commit. Codex reads the file with
   `deny_unknown_fields` only at the top level (`description`, `hooks`;
   `config/src/hook_config.rs:10-17`), a handler ignores unknown fields —
   including Claude Code's `args` (161-185). The timeout default would be 600 s
