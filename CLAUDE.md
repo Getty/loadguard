@@ -17,7 +17,7 @@ of `reuben` (evidence: `~/load-incidents/`).
 | Commits, `Changes`, card → done, release audit | `loadguard-release-manager` |
 
 Only the release-manager commits. The agents carry their skills via
-`briefing.skills` (`.claude/agents/`); skill sources under `.claude/skills/`.
+`skills:` (`.claude/agents/`); skill sources under `.claude/skills/`.
 
 ## Layout
 

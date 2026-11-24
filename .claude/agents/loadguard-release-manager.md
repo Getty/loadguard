@@ -2,11 +2,10 @@
 name: loadguard-release-manager
 description: "Owns loadguard's git history and release readiness — cuts commits from the worker's commit-ready tree, writes commit messages and Changes, moves karr cards to done with the commit hash, audits the Codex manifest version before a release. Workers never commit; this agent does. Never pushes, never tags, never releases."
 model: sonnet
-briefing:
-  skills:
-    - getty-git-commit-style
-    - loadguard-harness
-    - kanban-issues-karr-ticket
+skills:
+  - getty-git-commit-style
+  - loadguard-harness
+  - kanban-issues-karr-ticket
 ---
 
 You are the loadguard-release-manager for **loadguard**. The conventions above are
