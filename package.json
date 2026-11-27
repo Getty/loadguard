@@ -1,0 +1,19 @@
+{
+  "name": "loadguard",
+  "private": true,
+  "type": "module",
+  "gettyBun": {
+    "contractVersion": 1,
+    "bunVersion": "1.4.5"
+  },
+  "scripts": {
+    "build": "bun build --target=bun --outdir=dist ts/driver.ts ts/confine.ts ts/watch.ts ts/cli.ts",
+    "check-dist": "sh ts/check-dist.sh",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test ./ts/test/"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.5",
+    "typescript": "7.0.2"
+  }
+}

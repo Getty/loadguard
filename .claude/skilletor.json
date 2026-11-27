@@ -7,16 +7,27 @@
     "karr": {
       "git": "https://github.com/Getty/karr.git",
       "ref": "main"
+    },
+    "agent-bun-runtime": {
+      "git": "https://github.com/Getty/agent-bun-runtime.git",
+      "ref": "v0.1.0",
+      "path": "skills"
     }
   },
   "install": {
     "skills": [
       "getty-git-commit-style@getty",
-      "kanban-issues-karr-ticket@karr"
+      "kanban-issues-karr-ticket@karr",
+      "getty-bun@agent-bun-runtime",
+      "getty-bun-install@agent-bun-runtime",
+      "getty-bun-integration@agent-bun-runtime"
     ],
     "bundles": [
       "getty-house@getty"
     ]
+  },
+  "vars": {
+    "bun_version": "1.4.5"
   },
   "targets": [
     "claude"
