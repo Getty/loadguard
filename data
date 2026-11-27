@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-11-27T15:14:11Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T15:14:11Z
+created: 2026-11-27T14:07:42Z
+depends_on:
+- 19
+id: 21
+priority: high
+started: 2026-11-27T15:14:11Z
+status: done
+tags:
+- getty-bun
+- k11
+title: B5 Confinement and watcher in TS
+updated: 2026-11-27T15:14:11Z
+---
+
+dist/confine.js (busctl argv unchanged), watcher dist/watch.js as detached child with contract flags, setPriority(10), flock via bun:ffi with fallback to flock(1); learned-list writer compatible with C and Python; port RealScope and RealWatcher tests (only --user scopes with temp names).
+
+2026-11-27 14:58 Started B5. Plan: ts/scope.ts = confine.py + start_watcher (Python semantics: str.strip/split/splitlines, int(), os.path.join, shutil.which, makedirs, universal newlines, exception classes where Python catches by class); ts/confine.ts entry -> dist/confine.js. ts/watcher.ts = C --watch (read_stat sscanf, strtol, glibc bsearch, swap-remove of runs, learned_update via the cJSON port), ts/lock.ts = flock via bun:ffi (libc.so.6) with flock(1) on inherited fd 3 as fallback (probed: both exclude each other, lock survives flock(1)'s exit), ts/watch.ts entry -> dist/watch.js. Driver gains 'watch SESSION ROOT...' and 'confine-call' (JSON fn+args on stdin) for the parity harness. Python listdir and Bun readdirSync order probed equal.
+
+2026-11-27 15:10 Done. New: ts/scope.ts (confine.py + start_watcher), ts/confine.ts -> dist/confine.js (stdin JSON, --status, every error -> exit 0), ts/watcher.ts (C --watch: read_stat/statm, scope_of, top_shell, glibc bsearch, swap-remove of runs, learned_update via the cJSON port: flock learned.lock, tmp+fsync+rename+dir fsync, <=100 entries, format unchanged), ts/watch.ts -> dist/watch.js PID (setPriority 10, 2 s tick, flock LOCK_EX|LOCK_NB on <scope>.watch), ts/lock.ts (bun:ffi flock, fallback flock(1) on inherited fd 3), ts/libc.ts (dlopen libc.so.6: flock, getpwuid), ts/scope-call.ts (driver mode for parity). Watcher launch: spawn(process.execPath, --no-install --config=/dev/null --no-env-file watch.js pid, detached, stdio ignore, cwd /), the 8 contract env vars removed, setPriority(child,10), AttachProcessesToUnit after attached. busctl argv byte-identical (compared via the fake busctl log). Driver: watch SESSION ROOT... + scope-call. Parity (t/test_parity.py): Watch (driver watch + production --watch mirrored, state/runtime dirs rolled back and compared incl. bytes+modes), FindSession/Descendants/Limits/Delegation/BusctlArgv/Confine/FailOpen re-run with confine replaced by a Python-vs-TS twin (answer or exception class + fixture files + busctl argv log), TS-only Launcher/ConfineEntry/ProductionWatch, ScopeTwinFails. Mutation check (grow /9, dir mode 0750, CollectMode) failed ~30 parity tests. bun:test: scope.test.ts (argv, names, RealScope), watcher.test.ts (ffi/flock1 locks both ways, one driver pass, RealWatcher: lock pid, nice 10, second watcher <1.5 s, exit 0 within a tick, CPU ~20 ms < 0.2 s, scope collected). Difference found: Bun os.userInfo().username reads USER (unknown without) -> getpwuid via ffi, /etc/passwd fallback (ConfineEntry caught it). Kept for parity: C reads cwd through a 64-byte path (long test roots lose cwd). Not mirrored (noted): Python json NaN/Infinity, Unicode digits in env/int(). Verified: build ok, check-dist equal, typecheck 0, bun test 44 pass 0 fail, nice python3 -m unittest discover -s t: 551 OK (1 skip: ~/load-incidents absent; parity ran with bun on PATH). No watch.js left running, no loadguard-test-* units. C/Python untouched, hooks.json untouched.
+
+Committed as c68fa18
