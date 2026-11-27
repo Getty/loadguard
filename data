@@ -1,0 +1,19 @@
+---
+block_reason: SDK @getty/agent-bun-runtime 0.1.0 not on npm (registry 404, 2026-11-27);
+  per brief no git pin and no tarball - held until Getty publishes it.
+blocked: true
+class: standard
+created: 2026-11-27T14:07:39Z
+depends_on:
+- 19
+id: 20
+priority: high
+status: todo
+tags:
+- getty-bun
+- k11
+title: B4 Hook entry on the SDK codecs
+updated: 2026-11-27T14:08:15Z
+---
+
+dist/hook.js, host positional, onFailure open, maxInputBytes 8 MiB, Codex specifics in the handler. Exit 1 with visible message counts as fail-open until onFailure silent lands in 0.2.0 (L1); invariant 1 in loadguard-core says so. Re-pin the bytes test for the trailing LF.
