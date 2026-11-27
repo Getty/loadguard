@@ -1,0 +1,26 @@
+---
+claimed_at: 2026-11-27T15:35:16Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T15:35:16Z
+created: 2026-11-27T14:07:46Z
+depends_on:
+- 19
+id: 22
+priority: high
+started: 2026-11-27T15:35:16Z
+status: done
+tags:
+- getty-bun
+- k11
+title: B6 CLI on the starter
+updated: 2026-11-27T15:35:16Z
+---
+
+dist/cli.js, bin/loadguard as sh wrapper over the starter, positional args (forget all, help, explain reads stdin when the command starts with -), doctor checks the Bun slot and busctl instead of gcc.
+
+2026-11-27 15:24 B6 progress: ts/commands.ts (port of cli.py: status/explain call ts/report.ts in-process; doctor stage 1 via ts/scope.ts, stage 2/3 from the report, learning, new runtime section), ts/learnlist.ts (learn.py: read/forget/watcher; watcher check knows C --watch and TS watch.js argv), ts/slot.ts (getty-bun slot as the starter's status computes it, read-only; pin from package.json gettyBun.bunVersion bundled in), ts/cli.ts -> dist/cli.js; driver mode 'cli ROOT START ME ARG...'. t/test_parity_cli.py mirrors test_cli Status/Explain/Doctor and test_learn CommandLine against the TS side (42 green; mutations in size/ignored/more/deny texts caught). Next: bun:test, full suite.
+
+2026-11-27 15:31 Done (B6, no commit). New: ts/cli.ts -> dist/cli.js (entry), ts/commands.ts (port of lib/loadguard/cli.py; status/explain call ts/report.ts in-process), ts/learnlist.ts (port of learn.py read/forget/watcher), ts/slot.ts (getty-bun slot as the starter's status computes it, read-only; pin = package.json gettyBun.bunVersion bundled in), ts/test/cli.test.ts, t/test_parity_cli.py; driver mode 'cli ROOT START ME ARG...'; build script + tsconfig resolveJsonModule; scope.ts exports pyInt/envInt/userBus; libc.ts gains strerror. Deliberate differences from cli.py: positional only (help, forget all; any -h/--help/--all and 'explain -x' are usage, exit 2); explain without a command reads it from stdin (one final LF dropped) - the only way to a command starting with -; no hook binary/data dir: report in-process, pass-through and 'no report mode' answers gone, status hook line = 'decided in-process by <dist/cli.js>, the hook's own code'; doctor: binary/build/compiler rows gone (stage 2/3 keeps limits, never 'unknown'), new section 'runtime, Bun 1.4.5 from getty-bun: ready|missing|mismatch|cannot work here' (this Bun vs pin: FAIL on mismatch; slot ready ok / missing -- / mismatch or bad GETTY_HOME/target FAIL); hints say 'loadguard forget all'; 'no watcher' hint drops 'once the hook binary exists'; watcher check accepts the TS watcher argv (bun ... watch.js PID) beside C --watch. Not mirrored: Python json NaN/Infinity, ints > 2^53, 1.0 vs 1 on forget's rewrite; argv bytes that are not UTF-8. bin/loadguard stays Python (oracle); the sh wrapper over the starter is part of B7 (needs bootstrap/getty-bun.sh) - it must route an explain command with any '-' argument through stdin. Verified: typecheck 0, build ok, check-dist 'dist/ matches a fresh build', bun test ./ts/test/ 59 pass 0 fail, nice python3 -m unittest discover -s t: 593 OK (skip 1: ~/load-incidents absent), Bun on PATH. Mutations in size/ignored/+N more/deny texts failed 3-18 parity tests. No loadguard-test-* units, no watchers left.
+
+Committed as 1b5f587
