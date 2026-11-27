@@ -1,0 +1,17 @@
+---
+class: standard
+created: 2026-11-27T15:51:20Z
+depends_on:
+- 23
+id: 29
+priority: low
+status: todo
+tags:
+- getty-bun
+- k11
+- tests
+title: Drop the 64-byte cwd path emulation after the switch
+updated: 2026-11-27T15:51:20Z
+---
+
+src/loadguard-hook.c builds <root>/proc/<pid>/cwd in a 64-byte buffer (start_run ~2209 and ~2179). With a test root longer than ~45 chars the learned cwd comes out empty; four Watch tests in test_learn and test_parity fail under a long TMPDIR (also on main). Production (empty root) is unaffected. The TS watcher reproduces the limit for parity (k21). Once C is gone (B7, k23), remove the emulation from the TS watcher and its tests.
