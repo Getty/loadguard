@@ -9,7 +9,20 @@ and the two compared on exit code, stdout and stderr. The C result is what
 the inherited assertions then check, so each fixture is judged twice: by
 the test as written, and by the byte-for-byte comparison.
 
-Not mirrored: `watch SESSION ROOT...` (the watcher is ported in B5).
+The watcher (B5): the driver's `watch SESSION ROOT...` and the production
+`--watch PID` (dist/watch.js PID) are mirrored the same way, and since a
+watcher writes, the learned list and the runtime dir are compared too: the
+C run's changes are rolled back, the TS run repeats them, and both must
+leave the same files, bytes and modes behind.
+
+The confinement (B5): lib/loadguard/confine.py stays the oracle. The classes
+of test_confine that drive it run again with the module replaced, inside
+test_confine, by a twin that calls the Python function and then the same
+function of ts/scope.ts (`driver.js scope-call`) on the rolled-back fixture:
+same answer (or the same exception class), same fixture files after,
+including the fake busctl's log of every argv. Launching the watcher, the
+confine entry and the production watcher are checked by TS-only classes
+below, on the fake host of test_confine.
 
 Bun: $LOADGUARD_BUN, else `bun` on PATH; without one every test here is
 skipped, with the reason. Bun's caches go to a temporary directory, never
@@ -19,17 +32,27 @@ skipped, with the reason. Bun's caches go to a temporary directory, never
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+import test_confine as tc
 import test_hook_binary as thb
 import test_learn as tl
 import test_throttle as tt
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "lib"))
+from loadguard import confine as py_confine  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER_JS = os.path.join(ROOT, "dist", "driver.js")
+CONFINE_JS = os.path.join(ROOT, "dist", "confine.js")
+WATCH_JS = os.path.join(ROOT, "dist", "watch.js")
 BUN = os.environ.get("LOADGUARD_BUN") or shutil.which("bun")
 STATE = {}
 
@@ -79,6 +102,66 @@ def compare(c, ts, argv, stdin):
                ts.returncode, ts.stdout, ts.stderr[:500]))
 
 
+def snapshot(dirs):
+    """{path: (kind, mode, content)} of everything below dirs."""
+    out = {}
+    for top in dirs:
+        if not top or not os.path.isdir(top):
+            continue
+        for base, subdirs, files in os.walk(top):
+            for name in subdirs + files:
+                path = os.path.join(base, name)
+                st = os.lstat(path)
+                mode = stat.S_IMODE(st.st_mode)
+                if stat.S_ISDIR(st.st_mode):
+                    out[path] = ("dir", mode, None)
+                elif stat.S_ISLNK(st.st_mode):
+                    out[path] = ("link", None, os.readlink(path))
+                elif stat.S_ISREG(st.st_mode):
+                    with open(path, "rb") as f:
+                        out[path] = ("file", mode, f.read())
+                else:
+                    out[path] = ("other", mode, None)
+    return out
+
+
+def restore(before, after):
+    """Undo what changed between two snapshots; unchanged entries (a lock
+    file a test holds) are not touched."""
+    for path in sorted(set(after) - set(before), reverse=True):
+        if after[path][0] == "dir":
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    for path in sorted(before):
+        kind, mode, content = before[path]
+        if after.get(path) == before[path]:
+            continue
+        if kind == "dir":
+            os.makedirs(path, exist_ok=True)
+            os.chmod(path, mode)
+        elif kind == "file":
+            if os.path.lexists(path) and not os.path.isfile(path):
+                shutil.rmtree(path, ignore_errors=True)
+            with open(path, "wb") as f:
+                f.write(content)
+            os.chmod(path, mode)
+        elif kind == "link":
+            if os.path.lexists(path):
+                os.unlink(path)
+            os.symlink(content, path)
+
+
+def same_files(oracle, ts, what):
+    if oracle != ts:
+        diff = sorted(p for p in set(oracle) | set(ts)
+                      if oracle.get(p) != ts.get(p))
+        raise AssertionError(
+            "TS leaves other files than the oracle\n  call: %r\n%s" % (
+                what, "\n".join("  %s\n    oracle: %r\n    TS:     %r" % (
+                    p, oracle.get(p), ts.get(p)) for p in diff[:10])))
+
+
 class Parity:
     """Mixin: every C driver call of the test gets its TS twin."""
 
@@ -86,12 +169,30 @@ class Parity:
 
     def twin(self, run, driver):
         def mirrored(argv, stdin=b"{}", env=None, timeout=30):
+            env = tt.base_env() if env is None else env
+            watcher = argv[0] == driver() and argv[1:2] == ["watch"]
+            production = (argv[0] == tl.BIN.get("hook") and len(argv) == 3
+                          and argv[1] == "--watch")
+            if not (watcher or production):
+                proc = run(argv, stdin, env, timeout)
+                if argv[0] == driver():
+                    ts = run_ts(argv[1:], stdin, env, timeout)
+                    type(self).compared += 1
+                    compare(proc, ts, argv, stdin)
+                return proc
+            # A watcher writes: roll the C run back, let TS repeat it.
+            dirs = [env.get("XDG_STATE_HOME"), env.get("XDG_RUNTIME_DIR")]
+            before = snapshot(dirs)
             proc = run(argv, stdin, env, timeout)
-            if argv[0] == driver() and argv[1:2] != ["watch"]:
-                ts = run_ts(argv[1:], stdin,
-                            tt.base_env() if env is None else env, timeout)
-                type(self).compared += 1
-                compare(proc, ts, argv, stdin)
+            after_c = snapshot(dirs)
+            restore(before, after_c)
+            if watcher:
+                ts = run_ts(argv[1:], stdin, env, timeout)
+            else:
+                ts = run_ts(argv[2:], stdin, env, timeout, driver=WATCH_JS)
+            type(self).compared += 1
+            compare(proc, ts, argv, stdin)
+            same_files(after_c, snapshot(dirs), argv)
             return proc
         return mirrored
 
@@ -152,6 +253,10 @@ class Extract(Parity, tl.Extract):
 
 class LearnedHook(Parity, tl.Hook):
     pass
+
+
+class Watch(Parity, tl.Watch):
+    """The watcher: driver `watch` and production --watch, files included."""
 
 
 class Extraction(Parity, thb.Extraction):
@@ -443,3 +548,347 @@ class Edges(unittest.TestCase):
                     compare(c, run_ts(["--explain"], stdin, environ),
                             [tt.BIN["hook"], "--explain"], stdin)
                     type(self).compared += 1
+
+
+# --- the confinement: lib/loadguard/confine.py against ts/scope.ts ----------------
+
+def py_kind(e):
+    for kind in (OSError, IndexError, ValueError):
+        if isinstance(e, kind):
+            return kind.__name__
+    return type(e).__name__
+
+
+def user_of(uid):
+    """What getpwuid (as the test mocks it) answers for uid."""
+    try:
+        return py_confine.pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+
+
+# confine.py's name -> (ts/scope.ts's name, its arguments from Python's)
+SCOPE_FNS = {
+    "find_session": ("findSession", lambda root, start: [root, start]),
+    "session_name": ("sessionName", lambda root, pid: [root, pid]),
+    "descendants": ("descendants", lambda root, pid: [root, pid]),
+    "cgroup": ("cgroup", lambda root, pid: [root, pid]),
+    "limits": ("limits", lambda root, environ: [root, dict(environ)]),
+    "delegated": ("delegated", lambda root, run, uid: [root, run, uid]),
+    "lingering": ("lingering", lambda root, uid: [root, user_of(uid)]),
+    "scope_name": ("scopeName", lambda sid, pid: [sid, pid]),
+    "in_loadguard_scope": ("inLoadguardScope", lambda path: [path]),
+    "busctl_argv": ("busctlArgv", lambda busctl, name, pids, props, d:
+                    [busctl, name, list(pids), dict(props), d]),
+    "confine": ("confine", lambda sid, start=None, root="", environ=None,
+                uid=None, me=None: [sid, {
+                    "root": root, "environ": dict(environ), "uid": uid,
+                    "user": user_of(uid), "start": start, "me": me,
+                    "confirmS": py_confine.CONFIRM_S}]),
+}
+
+
+class ScopeTwin:
+    """Stands in for lib/loadguard/confine.py inside test_confine: a call of
+    a ported function runs the Python, rolls the fixture back, runs the
+    same call through `driver.js scope-call`, and demands the same answer
+    (or exception class) and the same files, the fake busctl's log of
+    argvs included. Everything else is the real module; attributes set on
+    the twin (CONFIRM_S) are set on the module."""
+
+    def __init__(self, test):
+        object.__setattr__(self, "_test", test)
+
+    def __setattr__(self, name, value):
+        setattr(py_confine, name, value)
+
+    def __getattr__(self, name):
+        real = getattr(py_confine, name)
+        if name not in SCOPE_FNS:
+            return real
+        fn, convert = SCOPE_FNS[name]
+        test = self._test
+
+        def twin(*args, **kwargs):
+            tree = getattr(test, "t", None)
+            dirs = [os.path.dirname(tree.root)] if tree else []
+            before = snapshot(dirs)
+            try:
+                py, raised = ("value", real(*args, **kwargs)), None
+            except Exception as e:  # noqa: BLE001 — compared, then re-raised
+                py, raised = ("raise", py_kind(e)), e
+            after_py = snapshot(dirs)
+            restore(before, after_py)
+            call = {"fn": fn, "args": convert(*args, **kwargs)}
+            proc = run_ts(["scope-call"], json.dumps(call).encode(),
+                          dict(os.environ))
+            type(test).compared += 1
+            if proc.returncode != 0 or proc.stderr:
+                raise AssertionError("scope-call failed: %r\n%s" % (
+                    call, proc.stderr.decode(errors="replace")[:2000]))
+            got = json.loads(proc.stdout)
+            want = {py[0]: json.loads(json.dumps(py[1]))}
+            if got != want:
+                raise AssertionError(
+                    "ts/scope.ts differs from confine.py\n  call: %r\n"
+                    "  Python: %r\n  TS:     %r" % (call, want, got))
+            same_files(after_py, snapshot(dirs), call)
+            if raised is not None:
+                raise raised
+            return py[1]
+        return twin
+
+
+class ScopeParity:
+    """Mixin: test_confine's `confine` is the twin for the whole test."""
+
+    compared = 0
+
+    def setUp(self):
+        patcher = mock.patch.object(tc, "confine", ScopeTwin(self))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        if cls.compared == 0:
+            raise AssertionError("%s: no confine.py call was mirrored "
+                                 "through ts/scope.ts" % cls.__name__)
+
+
+class FindSession(ScopeParity, tc.FindSession):
+    pass
+
+
+class Descendants(ScopeParity, tc.Descendants):
+    pass
+
+
+class Limits(ScopeParity, tc.Limits):
+    pass
+
+
+class Delegation(ScopeParity, tc.Delegation):
+    pass
+
+
+class BusctlArgv(ScopeParity, tc.BusctlArgv):
+    pass
+
+
+class Confine(ScopeParity, tc.Confine):
+    pass
+
+
+class FailOpen(ScopeParity, tc.FailOpen):
+    pass
+
+
+class ScopeTwinFails(unittest.TestCase):
+    """The twin can fail: a TS answer that differs is caught."""
+
+    compared = 0
+
+    def test_a_different_answer_fails(self):
+        twin = ScopeTwin(self)
+        with mock.patch.dict(SCOPE_FNS, {"scope_name": (
+                "scopeName", lambda sid, pid: [sid, pid + 1])}):
+            with self.assertRaises(AssertionError):
+                twin.scope_name("abc", 7)
+
+
+# --- starting the watcher: learn.start_watcher's tests, for ts/scope.ts -------------
+
+# Records what the watcher's process got: argv, pid, stat (after a moment,
+# so the parent's setPriority has landed), stdio, cwd, the environment.
+TS_WATCHER_STUB = """#!/bin/sh
+sleep 0.3
+fds=$(readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2)
+{ echo "$*"; echo $$; cat /proc/$$/stat; echo; echo "$fds"; pwd; env; } \\
+  > "$RECORD.tmp" && mv "$RECORD.tmp" "$RECORD"
+"""
+
+
+class Launcher(tc.Base):
+    """startWatcher of ts/scope.ts on the fake host of test_confine: the
+    cases of test_learn.Launcher, with the Bun launch in place of the
+    binary's: process.execPath (here a stub) with the starters' isolation
+    flags, dist/watch.js and the pid, without the variables the starters
+    remove, detached, nice 10, moved into the scope after "attached"."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = os.path.dirname(self.t.root)
+        self.entry = os.path.join(tmp, "dist", "watch.js")
+        os.makedirs(os.path.dirname(self.entry))
+        with open(self.entry, "w") as f:
+            f.write("// stands in for dist/watch.js\n")
+        self.bun = os.path.join(tmp, "bun")
+        with open(self.bun, "w") as f:
+            f.write(TS_WATCHER_STUB)
+        os.chmod(self.bun, 0o755)
+        self.record = os.path.join(tmp, "record")
+        self.t.env["RECORD"] = self.record
+
+    def start(self, status, start=2549600, entry=None, **env):
+        environ = dict(self.t.env, PATH=self.t.bin + ":/usr/bin:/bin",
+                       BUN_OPTIONS="--preload /x.js", NODE_PATH="/x",
+                       BUN_INSPECT="ws://x", KEEP_ME="1", **env)
+        call = {"fn": "startWatcher", "args": [status, {
+            "root": self.t.root, "environ": environ, "start": start,
+            "entry": self.entry if entry is None else entry,
+            "execPath": self.bun}]}
+        proc = run_ts(["scope-call"], json.dumps(call).encode(),
+                      dict(os.environ))
+        self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        return json.loads(proc.stdout)["value"]
+
+    def recorded(self):
+        deadline = time.monotonic() + 5
+        while not os.path.exists(self.record):
+            self.assertLess(time.monotonic(), deadline, "watcher not run")
+            time.sleep(0.02)
+        with open(self.record) as f:
+            lines = f.read().split("\n")
+        args, pid, stat_line = lines[:3]
+        fields = stat_line[stat_line.rindex(")") + 2:].split()
+        return {"args": args, "pid": int(pid), "sid": int(fields[3]),
+                "nice": int(fields[16]), "fds": lines[4:7], "cwd": lines[7],
+                "env": dict(line.split("=", 1) for line in lines[8:]
+                            if "=" in line)}
+
+    def argv(self, pid):
+        return "--no-install --config=/dev/null --no-env-file %s %d" % (
+            self.entry, pid)
+
+    def test_after_attached(self):
+        claude = self.reuben_session()
+        self.assertEqual(py_confine.confine(
+            tc.SESSION, start=2549600, root=self.t.root, environ=self.t.env,
+            uid=tc.UID, me=2549601), "attached")
+        before = len(self.t.calls())
+        self.assertEqual(self.start("attached"), "started")
+        got = self.recorded()
+        self.assertEqual(got["args"], self.argv(claude))
+        # Detached: its own session, stdio on /dev/null, cwd /, nice 10.
+        self.assertEqual(got["sid"], got["pid"])
+        self.assertEqual(got["fds"], ["/dev/null"] * 3)
+        self.assertEqual(got["cwd"], "/")
+        self.assertEqual(got["nice"], 10)
+        # Without what the starters remove; the rest as the hook had it.
+        for name in ("BUN_OPTIONS", "NODE_PATH", "BUN_INSPECT"):
+            self.assertNotIn(name, got["env"])
+        self.assertEqual(got["env"].get("KEEP_ME"), "1")
+        # The hook sat outside the scope: the watcher is moved in.
+        (attach,) = self.t.calls()[before:]
+        self.assertEqual(attach[6:12], [
+            "AttachProcessesToUnit", "ssau", "loadguard-091fbf8e-%d.scope"
+            % claude, "", "1", str(got["pid"])])
+
+    def test_after_already_no_move(self):
+        claude = self.reuben_session()
+        scope = tc.SLICE_PATH + "/loadguard-091fbf8e-%d.scope" % claude
+        self.t.write("/proc/%d/cgroup" % claude, "0::%s\n" % scope)
+        self.assertEqual(self.start("already"), "started")
+        self.assertEqual(self.recorded()["args"], self.argv(claude))
+        self.assertEqual(self.t.calls(), [])
+
+    def test_nested_claude_asks_for_the_scopes_owner(self):
+        outer = self.reuben_session()
+        scope = tc.SLICE_PATH + "/loadguard-091fbf8e-%d.scope" % outer
+        self.t.write("/proc/%d/cgroup" % outer, "0::%s\n" % scope)
+        self.t.proc(3000, outer, "bash", cgroup=scope)
+        self.t.proc(3001, 3000, "claude", ["claude", "-p", "x"], cgroup=scope)
+        self.t.proc(3002, 3001, "python3", cgroup=scope)
+        self.assertEqual(self.start("already", start=3002), "started")
+        self.assertEqual(self.recorded()["args"], self.argv(outer))
+
+    def test_not_started(self):
+        claude = self.reuben_session()
+        scope = tc.SLICE_PATH + "/loadguard-091fbf8e-%d.scope" % claude
+        self.t.write("/proc/%d/cgroup" % claude, "0::%s\n" % scope)
+        for status in ("no-linger", "disabled", "start-failed",
+                       "unconfirmed", "no-session", "stub"):
+            with self.subTest(status=status):
+                self.assertEqual(self.start(status), "not-confined")
+        self.assertEqual(self.start("already", LOADGUARD_LEARN="0"),
+                         "disabled")
+        self.assertEqual(self.start("already", entry=self.entry + ".gone"),
+                         "no-entry")
+        self.assertEqual(self.start("already", entry=self.t.root),
+                         "no-entry")
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(self.record))
+
+    def test_session_not_in_a_scope(self):
+        self.reuben_session()
+        self.assertEqual(self.start("already"), "not-confined")
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(self.record))
+
+
+class ConfineEntry(unittest.TestCase):
+    """dist/confine.js, as test_confine.Entry checks hooks/loadguard-confine:
+    exit 0, empty stdout, whatever it gets. XDG_RUNTIME_DIR is stripped (the
+    real session above the runner must not be moved) and LOADGUARD_LEARN=0
+    (no real watcher is started for it)."""
+
+    def run_entry(self, stdin, args=()):
+        env = {"PATH": "/usr/bin:/bin", "LOADGUARD_LEARN": "0"}
+        return run_ts(list(args), stdin, env, timeout=10, driver=CONFINE_JS)
+
+    def test_silent_on_any_payload(self):
+        for stdin in (b"", b"{", b"[]", b"null", b"\xff\xfe",
+                      b'{"session_id": 7}', b'{"session_id": "\\ud800"}',
+                      b'\xef\xbb\xbf{"session_id": "abc"}',
+                      b'{"session_id": "abc", "hook_event_name": "SessionStart",'
+                      b' "source": "startup"}'):
+            with self.subTest(stdin=stdin):
+                proc = self.run_entry(stdin)
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                                 (0, b"", b""))
+
+    def test_status_flag(self):
+        proc = self.run_entry(b'{"session_id": "abc"}', ["--status"])
+        self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        # As test_confine.Entry: every answer here returns before busctl.
+        self.assertIn(proc.stdout, (b"no-session\n", b"no-bus\n",
+                                    b"already\n", b"no-linger\n",
+                                    b"no-cgroup-v2\n"))
+
+    def test_same_status_as_the_python_hook(self):
+        for stdin in (b'{"session_id": "abc"}', b"garbage"):
+            with self.subTest(stdin=stdin):
+                py = subprocess.run(
+                    [tc.ENTRY, "--status"], input=stdin, capture_output=True,
+                    timeout=10, env={"PATH": "/usr/bin:/bin",
+                                     "LOADGUARD_LEARN": "0"})
+                ts = self.run_entry(stdin, ["--status"])
+                self.assertEqual((ts.returncode, ts.stdout, ts.stderr),
+                                 (py.returncode, py.stdout, py.stderr))
+
+
+class ProductionWatch(unittest.TestCase):
+    """dist/watch.js, as test_learn.ProductionWatchMode checks --watch:
+    quiet, never blocks on stdin, ends at once where there is nothing to
+    watch; any other number of arguments does nothing."""
+
+    def test_nothing_to_watch_ends_at_once(self):
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        for args in ([""], ["x"], ["0"], ["1"], ["-5"], ["12x"],
+                     ["99999999999"], [str(os.getpid())], ["4194303"], [],
+                     ["1", "2"]):
+            with self.subTest(args=args):
+                start = time.monotonic()
+                proc = subprocess.run(
+                    [BUN, "--no-install", "--config=/dev/null",
+                     "--no-env-file", WATCH_JS] + args, stdin=r,
+                    capture_output=True, timeout=10,
+                    env=bun_env(tt.base_env()))
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                                 (0, b"", b""))
+                self.assertLess(time.monotonic() - start, 5)

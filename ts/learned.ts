@@ -1,15 +1,15 @@
 // The learned list (k15), the reading half: ported from src/loadguard-hook.c
 // (learn_off, state_file, read_regular, parse_lesson, each_lesson,
 // keep_lesson, load_lessons, lesson_for, human_size, lesson_label, cut).
-// Written by the watcher and `loadguard forget`, never here.
+// Written by the watcher (ts/watcher.ts) and `loadguard forget`, never here.
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { type Bytes, fit, fixed, fromBuffer, isDigit, isSpace, pathOf } from "./bytes.js";
-import { get, parse, str } from "./cjson.js";
+import { get, type JValue, parse, str } from "./cjson.js";
 import { getenv } from "./env.js";
 import { PATH_MAX } from "./measure.js";
 
-const LEARNED_FILE = "learned.jsonl";
-const LEARNED_BYTES = 1 << 20; // larger: ignored, as if empty
+export const LEARNED_FILE = "learned.jsonl";
+export const LEARNED_BYTES = 1 << 20; // larger: ignored, as if empty
 const LEARNED_LINES = 256;     // lines read at most
 
 export type LearnState = "off" | "none" | "ok" | "too-large" | "unreadable";
@@ -44,7 +44,7 @@ export function stateFile(name: Bytes): Bytes | null {
  * A regular file of at most max bytes; else null and why. O_NONBLOCK and the
  * fstat keep a FIFO planted in its place from blocking the hook.
  */
-function readRegular(path: Bytes, max: number): { buf: Bytes | null; state: LearnState } {
+export function readRegular(path: Bytes, max: number): { buf: Bytes | null; state: LearnState } {
   let fd: number;
   try {
     fd = openSync(pathOf(path), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
@@ -70,15 +70,34 @@ function readRegular(path: Bytes, max: number): { buf: Bytes | null; state: Lear
   }
 }
 
-/** One line of the list as a lesson, if it is a JSON object with a string "command". */
-function parseLesson(line: Bytes): Lesson | null {
+/** One line of the list as a JSON object with a string "command", or null. */
+function parseLessonObject(line: Bytes): JValue | null {
   const r = parse(line, line.length, false);
   if (r === null) return null;
   let end = r.end;
   while (end < line.length && isSpace(line[end])) end++;
-  const command = str(get(r.value, "command"));
-  if (end !== line.length || r.value.t !== "obj" || command === null) return null;
-  const peak = get(r.value, "peak_rss"), last = str(get(r.value, "last_seen"));
+  if (end !== line.length || r.value.t !== "obj" || str(get(r.value, "command")) === null) return null;
+  return r.value;
+}
+
+/** Each object line of a list text, at most LEARNED_LINES, in order. */
+export function lessonObjects(buf: Bytes): JValue[] {
+  const out: JValue[] = [];
+  let lines = 0;
+  for (let line = 0; line < buf.length && lines < LEARNED_LINES; lines++) {
+    let end = buf.indexOf("\n", line);
+    if (end < 0) end = buf.length;
+    const o = parseLessonObject(buf.slice(line, end));
+    if (o !== null) out.push(o);
+    line = end + 1;
+  }
+  return out;
+}
+
+/** One object line of the list as a lesson. */
+function parseLesson(o: JValue): Lesson {
+  const command = str(get(o, "command")) as Bytes;
+  const peak = get(o, "peak_rss"), last = str(get(o, "last_seen"));
   let date = "";
   // The date goes into a reason: only YYYY-MM-DD.
   if (last !== null && last.length >= 10) {
@@ -103,14 +122,7 @@ export function loadLessons(): { state: LearnState; lessons: Lesson[] } {
   const { buf, state } = readRegular(path, LEARNED_BYTES);
   loaded.state = state;
   if (buf === null) return loaded;
-  let lines = 0;
-  for (let line = 0; line < buf.length && lines < LEARNED_LINES; lines++) {
-    let end = buf.indexOf("\n", line);
-    if (end < 0) end = buf.length;
-    const lesson = parseLesson(buf.slice(line, end));
-    if (lesson !== null) loaded.lessons.push(lesson);
-    line = end + 1;
-  }
+  for (const o of lessonObjects(buf)) loaded.lessons.push(parseLesson(o));
   return loaded;
 }
 

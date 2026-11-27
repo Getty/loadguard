@@ -29,7 +29,7 @@ export interface Slots {
 }
 
 /** Bytes a reason must not carry: controls, and non-ASCII unless UTF-8. */
-function sanitize(s: Bytes): Bytes {
+export function sanitize(s: Bytes): Bytes {
   const utf8 = validUtf8(s);
   let out = "";
   for (let i = 0; i < s.length; i++) {

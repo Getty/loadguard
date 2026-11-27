@@ -317,7 +317,7 @@ export function heavyCommand(cmd: Bytes): Match | null {
 
 // --- the Bash call behind a running shell (k15) ------------------------------
 
-const SHELLS = ["bash", "sh", "dash", "zsh"];
+export const SHELLS = ["bash", "sh", "dash", "zsh"];
 
 export enum Harness {
   ANY,     // the slot scan: Claude Code's wrapper, else Codex's

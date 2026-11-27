@@ -1,10 +1,11 @@
 // Fixture trees and the bundled driver for the bun:test suite. The same
 // fixtures the Python suite uses (t/fixtures/): recorded and reconstructed
 // /proc trees, process specs, event payloads. Nothing here produces load.
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll } from "bun:test";
+import { controllersPath, findBusctl } from "../scope.js";
 
 export const ROOT = join(import.meta.dir, "..", "..");
 export const FIXTURES = join(ROOT, "t", "fixtures");
@@ -116,4 +117,31 @@ export function reason(root: string, command: string, env: Record<string, string
   return hso["permissionDecisionReason"] ?? "";
 }
 
+/** busctl if a real --user scope can be made here, else null. */
+export function realScopeBusctl(): string | null {
+  const runtime = process.env["XDG_RUNTIME_DIR"] ?? "";
+  const busctl = findBusctl(process.env);
+  if (busctl === null || runtime === "" || !existsSync(join(runtime, "bus"))) return null;
+  try {
+    const uid = process.getuid?.() ?? -1;
+    return readFileSync(controllersPath(uid), "utf8").split(/\s+/).includes("memory") ? busctl : null;
+  } catch {
+    return null;
+  }
+}
+
+export function systemctl(...args: string[]): string {
+  return Bun.spawnSync(["systemctl", "--user", ...args], { stdin: "ignore", timeout: 10000 }).stdout.toString();
+}
+
+/** Until systemd has collected the unit; fails after 5 s. */
+export async function gone(name: string): Promise<void> {
+  const deadline = performance.now() + 5000;
+  while (systemctl("list-units", "--all", "--no-legend", name).trim() !== "") {
+    if (performance.now() > deadline) throw new Error(`scope lingers: ${name}`);
+    await Bun.sleep(50);
+  }
+}
+
 export { encoder };
+

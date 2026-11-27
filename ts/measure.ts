@@ -44,7 +44,7 @@ export function listDir(root: Bytes, path: Bytes): Bytes[] | null {
 }
 
 /** The kB figure of a /proc/meminfo key ("SwapFree:") at a line start. */
-function meminfo(buf: Bytes, key: Bytes): bigint | null {
+export function meminfo(buf: Bytes, key: Bytes): bigint | null {
   for (let p = buf.indexOf(key); p >= 0; p = buf.indexOf(key, p + key.length))
     if (p === 0 || buf[p - 1] === "\n") return number(buf, p + key.length);
   return null;

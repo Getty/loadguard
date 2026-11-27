@@ -1069,17 +1069,35 @@ function readRegular(path, max) {
     closeSync2(fd);
   }
 }
-function parseLesson(line) {
+function parseLessonObject(line) {
   const r = parse(line, line.length, false);
   if (r === null)
     return null;
   let end = r.end;
   while (end < line.length && isSpace(line[end]))
     end++;
-  const command = str(get(r.value, "command"));
-  if (end !== line.length || r.value.t !== "obj" || command === null)
+  if (end !== line.length || r.value.t !== "obj" || str(get(r.value, "command")) === null)
     return null;
-  const peak = get(r.value, "peak_rss"), last = str(get(r.value, "last_seen"));
+  return r.value;
+}
+function lessonObjects(buf) {
+  const out = [];
+  let lines = 0;
+  for (let line = 0;line < buf.length && lines < LEARNED_LINES; lines++) {
+    let end = buf.indexOf(`
+`, line);
+    if (end < 0)
+      end = buf.length;
+    const o = parseLessonObject(buf.slice(line, end));
+    if (o !== null)
+      out.push(o);
+    line = end + 1;
+  }
+  return out;
+}
+function parseLesson(o) {
+  const command = str(get(o, "command"));
+  const peak = get(o, "peak_rss"), last = str(get(o, "last_seen"));
   let date = "";
   if (last !== null && last.length >= 10) {
     let i = 0;
@@ -1106,17 +1124,8 @@ function loadLessons() {
   loaded.state = state;
   if (buf === null)
     return loaded;
-  let lines = 0;
-  for (let line = 0;line < buf.length && lines < LEARNED_LINES; lines++) {
-    let end = buf.indexOf(`
-`, line);
-    if (end < 0)
-      end = buf.length;
-    const lesson = parseLesson(buf.slice(line, end));
-    if (lesson !== null)
-      loaded.lessons.push(lesson);
-    line = end + 1;
-  }
+  for (const o of lessonObjects(buf))
+    loaded.lessons.push(parseLesson(o));
   return loaded;
 }
 function learnedFile() {
@@ -1600,13 +1609,1115 @@ function reportExplain(root, payload) {
   return line(out);
 }
 
+// ts/scope.ts
+import { spawn } from "child_process";
+import { accessSync, constants as constants3, existsSync, mkdirSync, readdirSync as readdirSync2, readFileSync, renameSync, statSync, writeFileSync } from "fs";
+import { setPriority } from "os";
+
+// ts/libc.ts
+import { CString, dlopen, FFIType, read } from "bun:ffi";
+var libc;
+function loadLibc() {
+  if (libc !== undefined)
+    return libc;
+  try {
+    const lib = dlopen("libc.so.6", {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr }
+    });
+    libc = {
+      flock: (fd, op) => lib.symbols.flock(fd, op),
+      userName: (uid) => {
+        const pw = lib.symbols.getpwuid(uid);
+        if (pw === null)
+          return null;
+        const name = read.ptr(pw, 0);
+        return name === 0 ? null : new CString(name).toString();
+      }
+    };
+  } catch {
+    libc = null;
+  }
+  return libc;
+}
+
+// ts/scope.ts
+var SLICE2 = "app-loadguard.slice";
+var PREFIX = "loadguard-";
+var DEFAULTS = [
+  ["MemoryHigh", "LOADGUARD_MEMORY_HIGH", 30, 1, 100],
+  ["MemoryMax", "LOADGUARD_MEMORY_MAX", 40, 1, 100],
+  ["MemorySwapMax", "LOADGUARD_MEMORY_SWAP_MAX", 10, 0, 100],
+  ["CPUWeight", "LOADGUARD_CPU_WEIGHT", 50, 1, 1e4]
+];
+var SESSION_NAMES = ["claude", "codex"];
+var MAX_DEPTH2 = 8;
+var BUSCTL_TIMEOUT_S = 2;
+var CONFIRM_S = 1;
+var BUN_ENV_REMOVED = [
+  "BUN_OPTIONS",
+  "BUN_INSPECT_PRELOAD",
+  "BUN_INSPECT",
+  "BUN_INSPECT_CONNECT_TO",
+  "NODE_PATH",
+  "NODE_COMPILE_CACHE",
+  "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+  "BUN_INTERNAL_WEBVIEW_HOST"
+];
+
+class PyError extends Error {
+  kind;
+  constructor(kind, message) {
+    super(kind + ": " + message);
+    this.kind = kind;
+  }
+}
+var PY_WS = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+var STRIP = new RegExp(`^[${PY_WS}]+|[${PY_WS}]+$`, "g");
+var SPLIT = new RegExp(`[${PY_WS}]+`);
+var LINES = /\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
+var MEMTOTAL = new RegExp(`(?:^|(?<=\\n))MemTotal:[${PY_WS}]+([0-9]+) kB(?=\\n|$)`);
+function pyStrip(s) {
+  return s.replace(STRIP, "");
+}
+function pySplit(s) {
+  return s.split(SPLIT).filter((w) => w !== "");
+}
+function pySplitlines(s) {
+  const lines = s.split(LINES);
+  if (lines[lines.length - 1] === "")
+    lines.pop();
+  return lines;
+}
+function pyInt(s) {
+  const t = pyStrip(s);
+  if (!/^[+-]?[0-9](?:_?[0-9])*$/.test(t))
+    throw new PyError("ValueError", "invalid literal for int(): " + s);
+  return Number(BigInt(t.replace(/_/g, "")));
+}
+function pyJoin(a, ...parts) {
+  let out = a;
+  for (const p of parts)
+    out = p.startsWith("/") ? p : out === "" || out.endsWith("/") ? out + p : out + "/" + p;
+  return out;
+}
+function wellFormed(s) {
+  return !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
+}
+function basename(p) {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+function dirname(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  return head !== "" && head !== "/".repeat(head.length) ? head.replace(/\/+$/, "") : head;
+}
+function makedirs(path, mode) {
+  const head = dirname(path);
+  if (head !== "" && basename(path) !== "" && !existsSync(head))
+    makedirs(head, 511);
+  try {
+    mkdirSync(path, { mode });
+  } catch (e) {
+    let dir = false;
+    try {
+      dir = statSync(path).isDirectory();
+    } catch {
+      dir = false;
+    }
+    if (!dir)
+      throw new PyError("OSError", String(e));
+  }
+}
+var DECODER = new TextDecoder("utf-8");
+function read2(root, path) {
+  let buf;
+  try {
+    buf = readFileSync(root + path);
+  } catch (e) {
+    throw new PyError("OSError", String(e));
+  }
+  return DECODER.decode(buf).replace(/\r\n?/g, `
+`);
+}
+function memTotal(root) {
+  const m = MEMTOTAL.exec(read2(root, "/proc/meminfo"));
+  return m === null ? null : BigInt(m[1]) * 1024n;
+}
+function envInt2(environ, name, def, lo, hi) {
+  const m = /^([0-9]+)%?$/.exec(environ[name] ?? "");
+  if (m !== null) {
+    const n = BigInt(m[1]);
+    if (BigInt(lo) <= n && n <= BigInt(hi))
+      return Number(n);
+  }
+  return def;
+}
+function limits(root, environ) {
+  const total = memTotal(root);
+  if (!total)
+    return null;
+  return DEFAULTS.map(([prop, name, def, lo, hi]) => {
+    const n = BigInt(envInt2(environ, name, def, lo, hi));
+    return [prop, prop === "CPUWeight" ? n : total * n / 100n];
+  });
+}
+function controllersPath(uid) {
+  return `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers`;
+}
+function delegated(root, runtimeDir, uid) {
+  const boot = pyStrip(read2(root, "/proc/sys/kernel/random/boot_id"));
+  const cache = pyJoin(runtimeDir, "loadguard", "delegation");
+  try {
+    const cached = pySplit(read2("", cache));
+    if (cached.length === 2 && cached[0] === boot && (cached[1] === "yes" || cached[1] === "no"))
+      return cached[1] === "yes";
+  } catch (e) {
+    if (!(e instanceof PyError))
+      throw e;
+  }
+  let yes;
+  try {
+    yes = pySplit(read2(root, controllersPath(uid))).includes("memory");
+  } catch (e) {
+    if (!(e instanceof PyError))
+      throw e;
+    return false;
+  }
+  try {
+    makedirs(dirname(cache), 448);
+    const tmp = `${cache}.${process.pid}`;
+    writeFileSync(tmp, `${boot} ${yes ? "yes" : "no"}
+`);
+    renameSync(tmp, cache);
+  } catch {}
+  return yes;
+}
+function userName(uid) {
+  const libc = loadLibc();
+  if (libc !== null)
+    return libc.userName(uid);
+  try {
+    for (const line of readFileSync("/etc/passwd", "utf8").split(`
+`)) {
+      const f = line.split(":");
+      if (f.length >= 3 && f[2] === String(uid))
+        return f[0];
+    }
+  } catch {}
+  return null;
+}
+function lingering(root, user) {
+  return user !== null && existsSync(root + "/var/lib/systemd/linger/" + user);
+}
+function ppid(root, pid) {
+  const stat = read2(root, `/proc/${pid}/stat`);
+  const close = stat.lastIndexOf(")");
+  if (close < 0)
+    throw new PyError("ValueError", "substring not found");
+  const fields = pySplit(stat.slice(close + 2));
+  if (fields.length < 2)
+    throw new PyError("IndexError", "list index out of range");
+  return pyInt(fields[1]);
+}
+function sessionName(root, pid) {
+  try {
+    const comm = pyStrip(read2(root, `/proc/${pid}/comm`));
+    if (SESSION_NAMES.includes(comm))
+      return comm;
+    const name = basename(read2(root, `/proc/${pid}/cmdline`).split("\x00")[0]);
+    return SESSION_NAMES.includes(name) ? name : null;
+  } catch (e) {
+    if (e instanceof PyError && e.kind === "OSError")
+      return null;
+    throw e;
+  }
+}
+function findSession(root, start) {
+  const chain = [];
+  let pid = start;
+  for (let i = 0;i < MAX_DEPTH2; i++) {
+    if (pid <= 1)
+      break;
+    if (sessionName(root, pid) !== null)
+      return [pid, chain];
+    chain.push(pid);
+    pid = ppid(root, pid);
+  }
+  return [null, []];
+}
+function cgroup(root, pid) {
+  for (const line of pySplitlines(read2(root, `/proc/${pid}/cgroup`)))
+    if (line.startsWith("0::"))
+      return line.slice(3);
+  return null;
+}
+function inLoadguardScope(path) {
+  return path.split("/").some((p) => p.startsWith(PREFIX) && p.endsWith(".scope"));
+}
+function descendants(root, pid) {
+  let names;
+  try {
+    names = readdirSync2(root + "/proc");
+  } catch (e) {
+    throw new PyError("OSError", String(e));
+  }
+  const children = new Map;
+  for (const name of names) {
+    if (!/^[0-9]+$/.test(name))
+      continue;
+    try {
+      const child = pyInt(name), parent = ppid(root, child);
+      const list = children.get(parent);
+      if (list === undefined)
+        children.set(parent, [child]);
+      else
+        list.push(child);
+    } catch (e) {
+      if (!(e instanceof PyError) || e.kind === "IndexError")
+        throw e;
+    }
+  }
+  const out = [], todo = [pid];
+  while (todo.length > 0) {
+    for (const child of children.get(todo.pop()) ?? []) {
+      out.push(child);
+      todo.push(child);
+    }
+  }
+  return out;
+}
+function scopeName(sessionId, pid) {
+  const short = (sessionId ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 8);
+  return `${PREFIX}${short !== "" ? short + "-" : ""}${pid}.scope`;
+}
+function busctlArgv(busctl, name, pids, props, description) {
+  const argv = [
+    busctl,
+    "--user",
+    `--timeout=${BUSCTL_TIMEOUT_S}`,
+    "call",
+    "org.freedesktop.systemd1",
+    "/org/freedesktop/systemd1",
+    "org.freedesktop.systemd1.Manager",
+    "StartTransientUnit",
+    "ssa(sv)a(sa(sv))",
+    name,
+    "fail"
+  ];
+  const sv = [
+    ["Description", "s", [description]],
+    ["Slice", "s", [SLICE2]],
+    ["PIDs", "au", [String(pids.length), ...pids.map(String)]],
+    ...props.map(([k, v]) => [k, "t", [String(v)]]),
+    ["OOMPolicy", "s", ["continue"]],
+    ["CollectMode", "s", ["inactive-or-failed"]],
+    ["Delegate", "b", ["true"]]
+  ];
+  argv.push(String(sv.length));
+  for (const [key, sig, value] of sv)
+    argv.push(key, sig, ...value);
+  argv.push("0");
+  return argv;
+}
+function run(argv) {
+  for (const a of argv)
+    if (a.includes("\x00") || !wellFormed(a))
+      throw new PyError("ValueError", "argument not passable");
+  const r = Bun.spawnSync({
+    cmd: argv,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: (BUSCTL_TIMEOUT_S + 1) * 1000,
+    killSignal: "SIGKILL"
+  });
+  if (r.exitedDueToTimeout)
+    throw new PyError("OSError", "busctl timed out");
+  return r.exitCode;
+}
+function startScope(busctl, name, pids, props, description) {
+  return run(busctlArgv(busctl, name, pids, props, description)) === 0;
+}
+function attach(busctl, name, pids) {
+  return run([
+    busctl,
+    "--user",
+    `--timeout=${BUSCTL_TIMEOUT_S}`,
+    "call",
+    "org.freedesktop.systemd1",
+    "/org/freedesktop/systemd1",
+    "org.freedesktop.systemd1.Manager",
+    "AttachProcessesToUnit",
+    "ssau",
+    name,
+    "",
+    String(pids.length),
+    ...pids.map(String)
+  ]) === 0;
+}
+function outside(root, pids, name) {
+  const out = [];
+  for (const pid of pids) {
+    let path;
+    try {
+      path = cgroup(root, pid);
+    } catch (e) {
+      if (e instanceof PyError && e.kind === "OSError")
+        continue;
+      throw e;
+    }
+    if (path !== null && !path.endsWith("/" + name))
+      out.push(pid);
+  }
+  return out;
+}
+function waitAttached(root, pid, name, confirmS = CONFIRM_S) {
+  const deadline = performance.now() + confirmS * 1000;
+  for (;; ) {
+    const path = cgroup(root, pid);
+    if (path !== null && path.endsWith("/" + name))
+      return true;
+    if (performance.now() >= deadline)
+      return false;
+    Bun.sleepSync(10);
+  }
+}
+function userBus(environ) {
+  const runtimeDir = environ["XDG_RUNTIME_DIR"] ?? "";
+  return runtimeDir.startsWith("/") && existsSync(pyJoin(runtimeDir, "bus")) ? runtimeDir : null;
+}
+function findBusctl(environ) {
+  const path = environ["PATH"] ?? "";
+  if (path === "")
+    return null;
+  const seen = new Set;
+  for (const dir of path.split(":")) {
+    if (seen.has(dir))
+      continue;
+    seen.add(dir);
+    const name = pyJoin(dir, "busctl");
+    try {
+      accessSync(name, constants3.X_OK);
+      if (!statSync(name).isDirectory())
+        return name;
+    } catch {}
+  }
+  return null;
+}
+function confine(sessionId, host = {}) {
+  const root = host.root ?? "", environ = host.environ ?? process.env;
+  const uid = host.uid ?? process.getuid?.() ?? -1;
+  const start = host.start ?? process.ppid, me = host.me ?? process.pid;
+  if (environ["LOADGUARD_CONFINE"] === "0")
+    return "disabled";
+  const [pid, chain] = findSession(root, start);
+  if (pid === null)
+    return "no-session";
+  const path = cgroup(root, pid);
+  if (path === null)
+    return "no-cgroup-v2";
+  if (inLoadguardScope(path))
+    return "already";
+  if (!lingering(root, host.user !== undefined ? host.user : userName(uid)))
+    return "no-linger";
+  const runtimeDir = userBus(environ);
+  if (runtimeDir === null)
+    return "no-bus";
+  const busctl = findBusctl(environ);
+  if (busctl === null)
+    return "no-busctl";
+  if (!delegated(root, runtimeDir, uid))
+    return "no-delegation";
+  const props = limits(root, environ);
+  if (props === null)
+    return "no-meminfo";
+  const name = scopeName(sessionId, pid);
+  const description = `loadguard: ${sessionName(root, pid) ?? "None"} session ${sessionId || pid}`;
+  if (!startScope(busctl, name, [pid], props, description))
+    return "start-failed";
+  if (!waitAttached(root, pid, name, host.confirmS ?? CONFIRM_S))
+    return "unconfirmed";
+  const others = outside(root, descendants(root, pid).filter((p) => !chain.includes(p) && p !== me), name);
+  if (others.length > 0 && !attach(busctl, name, others))
+    for (const other of others)
+      attach(busctl, name, [other]);
+  return "attached";
+}
+function scopeIn(path) {
+  const name = (path ?? "").split("/").pop();
+  return inLoadguardScope(name) ? name : null;
+}
+function owner(scope) {
+  const m = /-([0-9]+)\.scope\n?$/.exec(scope);
+  return m === null ? null : Number(m[1]);
+}
+function startWatcher(status, launch = {}) {
+  const root = launch.root ?? "", environ = launch.environ ?? process.env;
+  const start = launch.start ?? process.ppid;
+  const entry = launch.entry ?? import.meta.dir + "/watch.js";
+  if (environ["LOADGUARD_LEARN"] === "0")
+    return "disabled";
+  if (status !== "attached" && status !== "already")
+    return "not-confined";
+  try {
+    accessSync(entry, constants3.R_OK);
+    if (!statSync(entry).isFile())
+      return "no-entry";
+  } catch {
+    return "no-entry";
+  }
+  const [pid] = findSession(root, start);
+  const scope = pid !== null && pid !== 0 ? scopeIn(cgroup(root, pid)) : null;
+  if (scope === null || pid === null)
+    return "not-confined";
+  const env = { ...environ };
+  for (const name of BUN_ENV_REMOVED)
+    delete env[name];
+  const child = spawn(launch.execPath ?? process.execPath, ["--no-install", "--config=/dev/null", "--no-env-file", entry, String(owner(scope) || pid)], { detached: true, stdio: "ignore", cwd: "/", env });
+  child.on("error", () => {});
+  child.unref();
+  if (child.pid === undefined)
+    return "spawn-failed";
+  try {
+    setPriority(child.pid, 10);
+  } catch {}
+  const busctl = findBusctl(environ);
+  if (status === "attached" && busctl !== null)
+    attach(busctl, scope, [child.pid]);
+  return "started";
+}
+
+// ts/scope-call.ts
+function props(o) {
+  return Object.entries(o);
+}
+function host(o) {
+  const h = o, out = {};
+  if (typeof h["root"] === "string")
+    out.root = h["root"];
+  if (typeof h["environ"] === "object" && h["environ"] !== null)
+    out.environ = h["environ"];
+  if (typeof h["uid"] === "number")
+    out.uid = h["uid"];
+  if ("user" in h)
+    out.user = h["user"];
+  if (typeof h["start"] === "number")
+    out.start = h["start"];
+  if (typeof h["me"] === "number")
+    out.me = h["me"];
+  if (typeof h["confirmS"] === "number")
+    out.confirmS = h["confirmS"];
+  if (typeof h["entry"] === "string")
+    out.entry = h["entry"];
+  if (typeof h["execPath"] === "string")
+    out.execPath = h["execPath"];
+  return out;
+}
+var FNS = {
+  findSession: (root, start) => findSession(root, start),
+  sessionName: (root, pid) => sessionName(root, pid),
+  descendants: (root, pid) => descendants(root, pid),
+  cgroup: (root, pid) => cgroup(root, pid),
+  limits: (root, environ) => {
+    const l = limits(root, environ);
+    return l === null ? null : Object.fromEntries(l.map(([k, v]) => [k, Number(v)]));
+  },
+  delegated: (root, runtimeDir, uid) => delegated(root, runtimeDir, uid),
+  lingering: (root, user) => lingering(root, user),
+  scopeName: (id, pid) => scopeName(id, pid),
+  inLoadguardScope: (path) => inLoadguardScope(path),
+  busctlArgv: (b, name, pids, p, d) => busctlArgv(b, name, pids, props(p), d),
+  startScope: (b, name, pids, p, d) => startScope(b, name, pids, props(p), d),
+  attach: (b, name, pids) => attach(b, name, pids),
+  waitAttached: (root, pid, name, s) => waitAttached(root, pid, name, s),
+  findBusctl: (environ) => findBusctl(environ),
+  confine: (id, h) => confine(id, host(h)),
+  startWatcher: (status, h) => startWatcher(status, host(h))
+};
+function scopeCall(text) {
+  const call = JSON.parse(text);
+  const fn = FNS[call.fn];
+  if (fn === undefined)
+    return JSON.stringify({ raise: "NoSuchFunction" }) + `
+`;
+  try {
+    return JSON.stringify({ value: fn(...call.args) ?? null }) + `
+`;
+  } catch (e) {
+    return JSON.stringify({ raise: e instanceof PyError ? e.kind : "Error" }) + `
+`;
+  }
+}
+
+// ts/watcher.ts
+import { closeSync as closeSync3, fsyncSync, ftruncateSync, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync2, readlinkSync as readlinkSync2, renameSync as renameSync2, unlinkSync, writeSync, constants as constants4 } from "fs";
+import { setPriority as setPriority2 } from "os";
+
+// ts/lock.ts
+import { spawnSync } from "child_process";
+var LOCK_EX = 2;
+var LOCK_NB = 4;
+var forced = null;
+function flock1(fd, nonBlocking) {
+  try {
+    const r = spawnSync("flock", nonBlocking ? ["-x", "-n", "3"] : ["-x", "3"], {
+      stdio: ["ignore", "ignore", "ignore", fd]
+    });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+function lockFile(fd, nonBlocking) {
+  const libc = forced === "flock1" ? null : loadLibc();
+  if (libc !== null)
+    return libc.flock(fd, LOCK_EX | (nonBlocking ? LOCK_NB : 0)) === 0;
+  return forced === "ffi" ? false : flock1(fd, nonBlocking);
+}
+
+// ts/watcher.ts
+var TICK_S = 2;
+var RUNS = 16;
+var MAX_DEPTH3 = 64;
+var LEARNED_LOCK = "learned.lock";
+var LEARNED_MAX = 100;
+var LEARN_COMMAND_MAX = 4096;
+var INT_MAX3 = 2147483647;
+var LONG_MAX = (1n << 63n) - 1n;
+var LONG_MIN = -(1n << 63n);
+var ULL_MAX = (1n << 64n) - 1n;
+function strtol(s, i) {
+  let p = i;
+  while (isSpace(s[p]))
+    p++;
+  let neg = false;
+  if (s[p] === "+" || s[p] === "-")
+    neg = s[p++] === "-";
+  const q = p;
+  while (isDigit(s[p]))
+    p++;
+  if (p === q)
+    return { v: 0n, end: i };
+  let v = BigInt(s.slice(q, p));
+  if (neg)
+    v = -v;
+  return { v: v > LONG_MAX ? LONG_MAX : v < LONG_MIN ? LONG_MIN : v, end: p };
+}
+
+class Scan {
+  s;
+  p = 0;
+  constructor(s) {
+    this.s = s;
+  }
+  ws() {
+    while (isSpace(this.s[this.p]))
+      this.p++;
+  }
+  char() {
+    if (this.p >= this.s.length)
+      return false;
+    this.p++;
+    return true;
+  }
+  word() {
+    this.ws();
+    const q = this.p;
+    while (this.p < this.s.length && !isSpace(this.s[this.p]))
+      this.p++;
+    return this.p > q;
+  }
+  digits() {
+    this.ws();
+    let p = this.p, neg = false;
+    if (this.s[p] === "+" || this.s[p] === "-")
+      neg = this.s[p++] === "-";
+    const q = p;
+    while (isDigit(this.s[p]))
+      p++;
+    if (p === q)
+      return null;
+    this.p = p;
+    return { neg, v: BigInt(this.s.slice(q, p)) };
+  }
+  int() {
+    const d = this.digits();
+    if (d === null)
+      return null;
+    let v = d.neg ? -d.v : d.v;
+    v = v > LONG_MAX ? LONG_MAX : v < LONG_MIN ? LONG_MIN : v;
+    return Number(BigInt.asIntN(32, v));
+  }
+  ull() {
+    const d = this.digits();
+    if (d === null)
+      return null;
+    if (d.v > ULL_MAX)
+      return ULL_MAX;
+    return d.neg ? u64(-d.v) : d.v;
+  }
+}
+function readStat(root, pid) {
+  const raw = slurp(root, "/proc/" + pid + "/stat", 1024);
+  if (raw === null || raw.length === 0)
+    return null;
+  const buf = cstr(raw);
+  const open = buf.indexOf("("), close = buf.lastIndexOf(")");
+  if (open < 0 || close < 0)
+    return null;
+  const comm = fit(close - open - 1 >= 0 ? buf.slice(open + 1, close) : buf.slice(open + 1), 64);
+  const sc = new Scan(buf.slice(close + 1));
+  sc.ws();
+  if (!sc.char())
+    return null;
+  const ppid = sc.int();
+  if (ppid === null)
+    return null;
+  for (let i = 0;i < 17; i++)
+    if (!sc.word())
+      return null;
+  const start = sc.ull();
+  return start === null ? null : { comm, ppid, start };
+}
+function readRss(w, pid) {
+  const raw = slurp(w.root, "/proc/" + pid + "/statm", 256);
+  if (raw === null || raw.length === 0)
+    return null;
+  const sc = new Scan(cstr(raw));
+  if (!sc.word())
+    return null;
+  const pages = sc.ull();
+  return pages === null ? null : u64(pages * w.page);
+}
+function pageSize() {
+  try {
+    const auxv = readFileSync2("/proc/self/auxv");
+    for (let i = 0;i + 16 <= auxv.length; i += 16) {
+      const type = auxv.readBigUInt64LE(i);
+      if (type === 0n)
+        break;
+      if (type === 6n)
+        return auxv.readBigUInt64LE(i + 8);
+    }
+  } catch {}
+  return 4096n;
+}
+function harnessOf(root, pid, comm) {
+  let name = comm;
+  if (name !== "claude" && name !== "codex") {
+    const raw = slurp(root, "/proc/" + pid + "/cmdline", 4096);
+    if (raw === null || raw.length === 0)
+      return 0 /* ANY */;
+    name = base(cstr(raw));
+  }
+  return name === "claude" ? 1 /* CLAUDE */ : name === "codex" ? 2 /* CODEX */ : 0 /* ANY */;
+}
+function scopeOf(root, pid) {
+  const raw = slurp(root, "/proc/" + pid + "/cgroup", 4096);
+  if (raw === null || raw.length === 0)
+    return null;
+  const buf = cstr(raw);
+  let p = 0;
+  while (!buf.startsWith("0::", p)) {
+    const nl = buf.indexOf(`
+`, p);
+    if (nl < 0)
+      return null;
+    p = nl + 1;
+  }
+  const nl = buf.indexOf(`
+`, p);
+  const line = nl < 0 ? buf.slice(p) : buf.slice(p, nl);
+  const slash = line.lastIndexOf("/");
+  if (slash < 0)
+    return null;
+  const name = line.slice(slash + 1);
+  if (!name.startsWith("loadguard-") || name.length <= 16 || !name.endsWith(".scope"))
+    return null;
+  const procs = "/sys/fs/cgroup" + line.slice(3) + "/cgroup.procs";
+  return procs.length < PATH_MAX && name.length < 256 ? { procs, name } : null;
+}
+function makeDirs(file) {
+  if (file.length >= PATH_MAX)
+    return false;
+  const s = file.lastIndexOf("/");
+  if (s <= 0)
+    return false;
+  const dir = file.slice(0, s);
+  for (let i = 1;i < dir.length; i++) {
+    if (dir[i] !== "/")
+      continue;
+    try {
+      mkdirSync2(pathOf(dir.slice(0, i)), { mode: 448 });
+    } catch {}
+  }
+  try {
+    mkdirSync2(pathOf(dir), { mode: 448 });
+    return true;
+  } catch (e) {
+    return e.code === "EEXIST";
+  }
+}
+function setItem(o, key, item) {
+  if (o.t !== "obj")
+    return;
+  const at = o.items.findIndex(([k]) => k === key);
+  if (at >= 0)
+    o.items[at][1] = item;
+  else
+    o.items.push([key, item]);
+}
+function lastSeen(o) {
+  return str(get(o, "last_seen")) ?? "";
+}
+function writeAll(fd, data) {
+  for (let off = 0;off < data.length; )
+    off += writeSync(fd, data, off, data.length - off);
+}
+function writeLessons(path, all) {
+  const tmp = path + "." + process.pid + ".tmp";
+  let fd;
+  try {
+    fd = openSync3(pathOf(tmp), constants4.O_WRONLY | constants4.O_CREAT | constants4.O_TRUNC, 384);
+  } catch {
+    return;
+  }
+  let ok = true;
+  try {
+    writeAll(fd, toBuffer(all.map((o) => print(o) + `
+`).join("")));
+    fsyncSync(fd);
+  } catch {
+    ok = false;
+  }
+  try {
+    closeSync3(fd);
+  } catch {
+    ok = false;
+  }
+  try {
+    if (!ok)
+      throw new Error("write");
+    renameSync2(pathOf(tmp), pathOf(path));
+  } catch {
+    try {
+      unlinkSync(pathOf(tmp));
+    } catch {}
+    return;
+  }
+  const slash = path.lastIndexOf("/");
+  if (slash > 0) {
+    try {
+      const dfd = openSync3(pathOf(path.slice(0, slash)), constants4.O_RDONLY | constants4.O_DIRECTORY);
+      try {
+        fsyncSync(dfd);
+      } finally {
+        closeSync3(dfd);
+      }
+    } catch {}
+  }
+}
+function stamp(now) {
+  return new Date(now * 1000).toISOString().slice(0, 19) + "Z";
+}
+function learnedUpdate(r, now) {
+  const path = stateFile(LEARNED_FILE), lockPath = stateFile(LEARNED_LOCK);
+  if (path === null || lockPath === null || !makeDirs(lockPath))
+    return;
+  let lock;
+  try {
+    lock = openSync3(pathOf(lockPath), constants4.O_RDWR | constants4.O_CREAT, 384);
+  } catch {
+    return;
+  }
+  try {
+    if (!lockFile(lock, false))
+      return;
+    const { buf } = readRegular(path, LEARNED_BYTES);
+    const all = buf === null ? [] : lessonObjects(buf);
+    const when = stamp(now), command = r.command;
+    let hit = all.find((o) => str(get(o, "command")) === command);
+    if (hit === undefined) {
+      hit = jobj([["command", jstr(command)]]);
+      all.push(hit);
+    }
+    const peak = get(hit, "peak_rss"), mine = Number(r.peak);
+    setItem(hit, "peak_rss", jnum(peak !== null && peak.t === "num" && peak.v > mine ? peak.v : mine));
+    setItem(hit, "cwd", jstr(r.cwd));
+    if (get(hit, "first_seen") === null)
+      setItem(hit, "first_seen", jstr(when));
+    setItem(hit, "last_seen", jstr(when));
+    while (all.length > LEARNED_MAX) {
+      let oldest = 0;
+      for (let i = 1;i < all.length; i++)
+        if (lastSeen(all[i]) < lastSeen(all[oldest]))
+          oldest = i;
+      all.splice(oldest, 1);
+    }
+    writeLessons(path, all);
+  } finally {
+    closeSync3(lock);
+  }
+}
+function logRun(w, event, r, why) {
+  if (w.log === null)
+    return;
+  const o = [
+    ["tick", jnum(w.pass)],
+    ["event", jstr(event)],
+    ["pid", jnum(r.pid)],
+    ["peak", jnum(Number(r.peak))]
+  ];
+  if (r.command !== null)
+    o.push(["command", jstr(r.command)]);
+  if (why !== null)
+    o.push(["why", jstr(why)]);
+  w.log.push(print(jobj(o)) + `
+`);
+}
+function record(w, r, now, event) {
+  learnedUpdate(r, now);
+  r.written = r.peak;
+  logRun(w, event, r, null);
+}
+function runCommand(w, pid) {
+  const size = 1 << 18;
+  const buf = slurp(w.root, "/proc/" + pid + "/cmdline", size);
+  if (buf === null || buf.length === 0 || buf.length >= size - 1)
+    return { cmd: null, why: "cmdline" };
+  const cmd = shellCommand(splitArgv(buf, MAX_WORDS), w.harness);
+  if (cmd === null)
+    return { cmd: null, why: "form" };
+  if (cmd.length === 0 || cmd.length > LEARN_COMMAND_MAX || !validUtf8(cmd))
+    return { cmd: null, why: "text" };
+  if (heavyCommand(cmd) !== null)
+    return { cmd: null, why: "fixed" };
+  return { cmd, why: "" };
+}
+function startRun(w, sh, now) {
+  if (w.runs.length === RUNS) {
+    logRun(w, "skip", { pid: sh.pid, peak: sh.sum, command: null }, "full");
+    return;
+  }
+  const r = { pid: sh.pid, learning: false, start: sh.start, peak: sh.sum, written: 0n, command: null, cwd: "" };
+  w.runs.push(r);
+  const { cmd, why } = runCommand(w, sh.pid);
+  if (cmd === null) {
+    logRun(w, "skip", r, why);
+    return;
+  }
+  r.command = cmd;
+  const path = fit(w.root + "/proc/" + sh.pid + "/cwd", 64);
+  try {
+    r.cwd = fromBuffer(readlinkSync2(pathOf(path), { encoding: "buffer" })).slice(0, PATH_MAX - 1);
+  } catch {
+    r.cwd = "";
+  }
+  r.cwd = sanitize(cstr(r.cwd));
+  r.learning = true;
+  record(w, r, now, "learn");
+}
+function endRun(w, i, now) {
+  const r = w.runs[i];
+  if (r.learning)
+    record(w, r, now, "end");
+  w.runs[i] = w.runs[w.runs.length - 1];
+  w.runs.pop();
+}
+function findW(ps, pid) {
+  let l = 0, u = ps.length;
+  while (l < u) {
+    const idx = l + u >> 1, other = ps[idx].pid;
+    if (pid < other)
+      u = idx;
+    else if (pid > other)
+      l = idx + 1;
+    else
+      return idx;
+  }
+  return -1;
+}
+function topShell(ps, i, session) {
+  let top = -1, p = i;
+  for (let depth = 0;depth < MAX_DEPTH3 && ps[p].pid !== session; depth++) {
+    const proc = ps[p];
+    if (proc.shell)
+      top = p;
+    if (proc.ppid === session)
+      return top;
+    if ((p = findW(ps, proc.ppid)) < 0)
+      return -1;
+  }
+  return -1;
+}
+function watchTick(w, now) {
+  const st = readStat(w.root, w.session);
+  const buf = st === null || st.start !== w.since ? null : slurp(w.root, w.procs, 1 << 16);
+  if (buf === null) {
+    while (w.runs.length > 0)
+      endRun(w, w.runs.length - 1, now);
+    return false;
+  }
+  const text = cstr(buf), ps = [];
+  for (let p = 0;; ) {
+    const { v, end } = strtol(text, p);
+    if (end === p)
+      break;
+    p = end;
+    if (v <= 0n || v > BigInt(INT_MAX3) || v === BigInt(w.self))
+      continue;
+    const pid = Number(v), s = readStat(w.root, pid);
+    const rss = s === null ? null : readRss(w, pid);
+    if (s === null || rss === null)
+      continue;
+    ps.push({ pid, ppid: s.ppid, shell: SHELLS.includes(s.comm), start: s.start, rss, sum: 0n });
+  }
+  ps.sort((a, b) => a.pid - b.pid);
+  for (let i = 0;i < ps.length; i++) {
+    const top = topShell(ps, i, w.session);
+    if (top >= 0)
+      ps[top].sum = u64(ps[top].sum + ps[i].rss);
+  }
+  for (let j = w.runs.length - 1;j >= 0; j--) {
+    const r = w.runs[j], at = findW(ps, r.pid);
+    if (at < 0 || ps[at].start !== r.start) {
+      endRun(w, j, now);
+      continue;
+    }
+    const sh = ps[at];
+    if (sh.sum > r.peak)
+      r.peak = sh.sum;
+    if (r.learning && r.peak >= r.written + r.written / 10n)
+      record(w, r, now, "grow");
+  }
+  for (const sh of ps) {
+    if (!sh.shell || sh.sum < w.limit)
+      continue;
+    if (!w.runs.some((r) => r.pid === sh.pid && r.start === sh.start))
+      startRun(w, sh, now);
+  }
+  return true;
+}
+function watchSetup(root, pid, log) {
+  const st = readStat(root, pid);
+  if (st === null)
+    return null;
+  const harness = harnessOf(root, pid, st.comm);
+  if (harness === 0 /* ANY */)
+    return null;
+  const sc = scopeOf(root, pid);
+  if (sc === null)
+    return null;
+  const buf = slurp(root, "/proc/meminfo", 8192);
+  const total = buf === null || buf.length === 0 ? null : meminfo(cstr(buf), "MemTotal:");
+  if (total === null || total === 0n)
+    return null;
+  const w = {
+    root,
+    session: pid,
+    self: process.pid,
+    since: st.start,
+    harness,
+    procs: sc.procs,
+    limit: u64(u64(u64(total * 1024n) / 100n) * BigInt(limit("learnRss", LEARN_RSS_DEFAULT))),
+    page: pageSize(),
+    runs: [],
+    log,
+    pass: 0
+  };
+  return { w, scope: sc.name };
+}
+function watchLock(scope) {
+  const run = getenv("XDG_RUNTIME_DIR");
+  if (run === null || run[0] !== "/")
+    return null;
+  const path = run + "/loadguard/" + scope + ".watch";
+  if (path.length >= PATH_MAX || !makeDirs(path))
+    return null;
+  let fd;
+  try {
+    fd = openSync3(pathOf(path), constants4.O_RDWR | constants4.O_CREAT, 384);
+  } catch {
+    return null;
+  }
+  if (!lockFile(fd, true)) {
+    closeSync3(fd);
+    return null;
+  }
+  try {
+    ftruncateSync(fd, 0);
+    writeAll(fd, toBuffer(process.pid + `
+`));
+  } catch {}
+  return { fd, path };
+}
+function watchUnlock(lock) {
+  try {
+    unlinkSync(pathOf(lock.path));
+  } catch {}
+  closeSync3(lock.fd);
+}
+function watch(arg) {
+  const { v, end } = strtol(arg, 0);
+  if (arg === "" || end !== arg.length || v <= 1n || v > BigInt(INT_MAX3) || learnOff())
+    return;
+  try {
+    process.chdir("/");
+  } catch {
+    return;
+  }
+  try {
+    setPriority2(10);
+  } catch {}
+  const setup = watchSetup("", Number(v), null);
+  if (setup === null)
+    return;
+  const lock = watchLock(setup.scope);
+  if (lock === null)
+    return;
+  while (watchTick(setup.w, Math.floor(Date.now() / 1000)))
+    Bun.sleepSync(TICK_S * 1000);
+  watchUnlock(lock);
+}
+
 // ts/driver.ts
+function driverWatch(arg, roots) {
+  const now = process.env["LOADGUARD_TEST_NOW"];
+  const base = now !== undefined ? Number(strtol(now, 0).v) : 1790000000;
+  const log = [];
+  const { v, end } = strtol(arg, 0);
+  let status = "done";
+  const setup = end !== arg.length || v <= 0n || v > 2147483647n ? null : watchSetup(roots[0], Number(v), log);
+  if (setup === null) {
+    status = "no-scope";
+  } else {
+    const lock = watchLock(setup.scope);
+    if (lock === null) {
+      status = "locked";
+    } else {
+      for (let i = 0;i < roots.length; i++) {
+        setup.w.root = roots[i];
+        setup.w.pass = i + 1;
+        if (!watchTick(setup.w, base + TICK_S * i)) {
+          status = "gone";
+          break;
+        }
+      }
+      watchUnlock(lock);
+    }
+  }
+  return log.join("") + '{"watch":"' + status + `"}
+`;
+}
 var args = process.argv.slice(2);
 var mode = args[0] ?? "";
 var out = "";
 var rc = 0;
 if (args.length === 1 && mode === "--report") {
   out = reportStatus("");
+} else if (args.length === 1 && mode === "scope-call") {
+  out = utf8Bytes(scopeCall(await Bun.stdin.text()));
 } else {
   const buf = await readAll(Bun.stdin.stream());
   const payload = buf === null ? null : parsePayload(buf);
@@ -1640,6 +2751,8 @@ if (args.length === 1 && mode === "--report") {
       rc = 1;
     else
       out = cmd;
+  } else if (args.length >= 3 && mode === "watch") {
+    out = driverWatch(args[1], args.slice(2).map(utf8Bytes));
   } else if (args.length === 1 && (mode === "command" || mode === "heavy")) {
     rc = 1;
   } else {

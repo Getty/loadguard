@@ -7,7 +7,7 @@
     "bunVersion": "1.4.5"
   },
   "scripts": {
-    "build": "bun build --target=bun --outdir=dist ts/driver.ts",
+    "build": "bun build --target=bun --outdir=dist ts/driver.ts ts/confine.ts ts/watch.ts",
     "check-dist": "sh ts/check-dist.sh",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test ./ts/test/"
