@@ -1531,88 +1531,8 @@ function hook(root, payload) {
   ]);
 }
 
-// ts/report.ts
-var REPORT_FORMAT = 1;
-function percent(v) {
-  return v >= 0 ? jnum(v) : jnull;
-}
-function reportStart(mode, off) {
-  const ignored = [];
-  if (getenv("LOADGUARD_THROTTLE") !== null && !off)
-    ignored.push(jstr("LOADGUARD_THROTTLE"));
-  for (const which of Object.keys(LIMITS))
-    if (getenv(LIMITS[which].env) !== null && limit(which, -1) < 0)
-      ignored.push(jstr(LIMITS[which].env));
-  if (getenv("LOADGUARD_LEARN") !== null && !learnOff())
-    ignored.push(jstr("LOADGUARD_LEARN"));
-  return [["report", jnum(REPORT_FORMAT)], ["mode", jstr(mode)], ["throttle", jbool(!off)], ["ignored", jarr(ignored)]];
-}
-function putLearn(out) {
-  const { state, lessons } = loadLessons();
-  const file = learnedFile();
-  out.push(["learn", jobj([
-    ["on", jbool(!learnOff())],
-    ["file", file === null ? jnull : jstr(file)],
-    ["state", jstr(state)],
-    ["entries", jnum(lessons.length)],
-    ["rss_limit", jnum(limit("learnRss", LEARN_RSS_DEFAULT))]
-  ])]);
-}
-function putRoom(out, root, v, slotLimit) {
-  const limits = [["psi_full", jnum(v.c.psiFull)], ["swap_used", jnum(v.c.swapUsed)]];
-  if (slotLimit)
-    limits.push(["slots", jnum(v.c.slots)]);
-  out.push(["limits", jobj(limits)]);
-  out.push(["pressure", jobj([
-    ["full", percent(v.pr.full)],
-    ["some", percent(psiSome(root))],
-    ["swap", percent(v.pr.swap)],
-    ["zram", percent(zramFill(root))]
-  ])]);
-  out.push(["pressured", jbool(v.pressured)]);
-  out.push(["slots", v.scanned ? jobj([["busy", jnum(v.sl.busy)], ["holders", jarr(v.sl.holders.map(jstr))]]) : jnull]);
-}
-function line(out) {
-  return print(jobj(out)) + `
-`;
-}
-function reportStatus(root) {
-  const v = newVerdict();
-  v.off = throttleOff();
-  const full = noRoom(root, v);
-  if (!v.scanned)
-    v.c.slots = limit("slots", defaultSlots());
-  const out = reportStart("status", v.off);
-  putRoom(out, root, v, true);
-  out.push(["refuse_heavy", jbool(!v.off && full)]);
-  putLearn(out);
-  return line(out);
-}
-function reportExplain(root, payload) {
-  const command = bashCommand(payload);
-  let reason = null;
-  let out;
-  if (command === null) {
-    out = reportStart("explain", throttleOff());
-    out.push(["bash", jbool(false)]);
-  } else {
-    const v = newVerdict();
-    reason = objection(root, command, fromCodex(payload, null), v);
-    out = reportStart("explain", v.off);
-    out.push(["bash", jbool(true)]);
-    out.push(["heavy", v.m === null ? jnull : jstr(v.m.label)]);
-    if (!v.off && v.m !== null)
-      putRoom(out, root, v, v.scanned);
-  }
-  out.push(["decision", jstr(reason !== null ? "deny" : "allow")]);
-  out.push(["reason", reason === null ? jnull : jstr(reason)]);
-  return line(out);
-}
-
-// ts/scope.ts
-import { spawn } from "child_process";
-import { accessSync, constants as constants3, existsSync, mkdirSync, readdirSync as readdirSync2, readFileSync, renameSync, statSync, writeFileSync } from "fs";
-import { setPriority } from "os";
+// ts/learnlist.ts
+import { closeSync as closeSync3, constants as constants4, existsSync as existsSync2, fsyncSync, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync2, readSync as readSync3, renameSync as renameSync2, statSync as statSync2, unlinkSync, writeSync } from "fs";
 
 // ts/libc.ts
 import { CString, dlopen, FFIType, read } from "bun:ffi";
@@ -1623,7 +1543,8 @@ function loadLibc() {
   try {
     const lib = dlopen("libc.so.6", {
       flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr }
+      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr },
+      strerror: { args: [FFIType.i32], returns: FFIType.cstring }
     });
     libc = {
       flock: (fd, op) => lib.symbols.flock(fd, op),
@@ -1633,7 +1554,8 @@ function loadLibc() {
           return null;
         const name = read.ptr(pw, 0);
         return name === 0 ? null : new CString(name).toString();
-      }
+      },
+      strerror: (errno) => String(lib.symbols.strerror(errno))
     };
   } catch {
     libc = null;
@@ -1641,7 +1563,32 @@ function loadLibc() {
   return libc;
 }
 
+// ts/lock.ts
+import { spawnSync } from "child_process";
+var LOCK_EX = 2;
+var LOCK_NB = 4;
+var forced = null;
+function flock1(fd, nonBlocking) {
+  try {
+    const r = spawnSync("flock", nonBlocking ? ["-x", "-n", "3"] : ["-x", "3"], {
+      stdio: ["ignore", "ignore", "ignore", fd]
+    });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+function lockFile(fd, nonBlocking) {
+  const libc = forced === "flock1" ? null : loadLibc();
+  if (libc !== null)
+    return libc.flock(fd, LOCK_EX | (nonBlocking ? LOCK_NB : 0)) === 0;
+  return forced === "ffi" ? false : flock1(fd, nonBlocking);
+}
+
 // ts/scope.ts
+import { spawn } from "child_process";
+import { accessSync, constants as constants3, existsSync, mkdirSync, readdirSync as readdirSync2, readFileSync, renameSync, statSync, writeFileSync } from "fs";
+import { setPriority } from "os";
 var SLICE2 = "app-loadguard.slice";
 var PREFIX = "loadguard-";
 var DEFAULTS = [
@@ -2088,6 +2035,841 @@ function startWatcher(status, launch = {}) {
   return "started";
 }
 
+// ts/learnlist.ts
+var FILE = "learned.jsonl";
+var LOCK = "learned.lock";
+var MAX_BYTES = 1 << 20;
+var MAX_LINES = 256;
+
+class ForgetError extends Error {
+}
+function strerror(e) {
+  const errno = e.errno;
+  const libc = typeof errno === "number" ? loadLibc() : null;
+  if (libc !== null)
+    return libc.strerror(Math.abs(errno));
+  return e instanceof Error ? e.message : String(e);
+}
+function disabled(environ) {
+  return environ["LOADGUARD_LEARN"] === "0";
+}
+function join(a, ...parts) {
+  let out = a;
+  for (const p of parts)
+    out = p.startsWith("/") ? p : out === "" || out.endsWith("/") ? out + p : out + "/" + p;
+  return out;
+}
+function dirname2(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  return head !== "" && head !== "/".repeat(head.length) ? head.replace(/\/+$/, "") : head;
+}
+function stateDir(environ) {
+  const xdg = environ["XDG_STATE_HOME"] ?? "", home = environ["HOME"] ?? "";
+  if (xdg.startsWith("/"))
+    return join(xdg, "loadguard");
+  if (home.startsWith("/"))
+    return join(home, ".local", "state", "loadguard");
+  return null;
+}
+function listPath(environ) {
+  const d = stateDir(environ);
+  return d !== null ? join(d, FILE) : null;
+}
+function isEntry(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof v["command"] === "string";
+}
+function parse2(text) {
+  const out = [];
+  for (const line of text.split(`
+`).slice(0, MAX_LINES)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (isEntry(entry))
+      out.push(entry);
+  }
+  return out;
+}
+function read3(path) {
+  let fd;
+  try {
+    fd = openSync3(path, constants4.O_RDONLY);
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return [[], null];
+    return [[], strerror(e)];
+  }
+  const buf = Buffer.alloc(MAX_BYTES + 1);
+  let n = 0;
+  try {
+    for (;; ) {
+      const got = readSync3(fd, buf, n, buf.length - n, null);
+      if (got === 0 || (n += got) === buf.length)
+        break;
+    }
+  } catch (e) {
+    return [[], strerror(e)];
+  } finally {
+    closeSync3(fd);
+  }
+  if (n > MAX_BYTES)
+    return [[], "too-large"];
+  return [parse2(new TextDecoder("utf-8").decode(buf.subarray(0, n))), null];
+}
+function makedirs2(path, mode) {
+  const head = dirname2(path);
+  if (head !== "" && !path.endsWith("/") && !existsSync2(head))
+    makedirs2(head, 511);
+  try {
+    mkdirSync2(path, { mode });
+  } catch (e) {
+    let dir = false;
+    try {
+      dir = statSync2(path).isDirectory();
+    } catch {
+      dir = false;
+    }
+    if (!dir)
+      throw e;
+  }
+}
+function rewrite(path, entries) {
+  if (entries.length === 0) {
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      if (e.code !== "ENOENT")
+        throw e;
+    }
+    return;
+  }
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    const fd = openSync3(tmp, "w");
+    try {
+      const data = Buffer.from(entries.map((e) => JSON.stringify(e) + `
+`).join(""), "utf8");
+      for (let n = 0;n < data.length; )
+        n += writeSync(fd, data, n);
+      fsyncSync(fd);
+    } finally {
+      closeSync3(fd);
+    }
+    renameSync2(tmp, path);
+  } finally {
+    if (existsSync2(tmp))
+      unlinkSync(tmp);
+  }
+  const dir = openSync3(dirname2(path), constants4.O_RDONLY | constants4.O_DIRECTORY);
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync3(dir);
+  }
+}
+function forget(path, numbers) {
+  makedirs2(dirname2(path), 448);
+  const lock = openSync3(join(dirname2(path), LOCK), "a");
+  try {
+    lockFile(lock, false);
+    const [entries, problem] = read3(path);
+    let dropped, kept;
+    if (numbers === null) {
+      [dropped, kept] = [entries, []];
+    } else if (problem !== null) {
+      throw new ForgetError(`the list cannot be read (${problem})`);
+    } else {
+      const bad = numbers.filter((n) => !(1 <= n && n <= entries.length));
+      if (bad.length > 0)
+        throw new ForgetError(`no entry ${bad[0]}: the list has ${entries.length}`);
+      dropped = entries.filter((_e, i) => numbers.includes(i + 1));
+      kept = entries.filter((_e, i) => !numbers.includes(i + 1));
+    }
+    rewrite(path, kept);
+    return dropped;
+  } finally {
+    closeSync3(lock);
+  }
+}
+function watchFile(runtimeDir, scope) {
+  return join(runtimeDir, "loadguard", scope + ".watch");
+}
+function isWatcher(argv) {
+  if (argv.length > 2 && argv[1] === "--watch")
+    return true;
+  const i = argv.findIndex((a, n) => n > 0 && (a === "watch.js" || a.endsWith("/watch.js")));
+  return i > 0 && /^[0-9]+$/.test(argv[i + 1] ?? "");
+}
+function watcher(environ, scope, procRoot = "") {
+  const runtime = environ["XDG_RUNTIME_DIR"] ?? "";
+  if (!runtime.startsWith("/") || scope === "")
+    return null;
+  let pid, argv;
+  try {
+    const raw = readFileSyncOrNull(watchFile(runtime, scope));
+    if (raw === null || /[^\x00-\x7f]/.test(raw.toString("latin1")))
+      return null;
+    const first = pySplit(raw.toString("latin1").replace(/\r\n?/g, `
+`))[0];
+    if (first === undefined)
+      return null;
+    pid = pyInt(first);
+    const cmdline = readFileSyncOrNull(`${procRoot}/proc/${pid}/cmdline`);
+    if (cmdline === null)
+      return null;
+    argv = cmdline.toString("latin1").split("\x00");
+  } catch {
+    return null;
+  }
+  return isWatcher(argv) ? pid : null;
+}
+function readFileSyncOrNull(path) {
+  try {
+    return readFileSync2(path);
+  } catch {
+    return null;
+  }
+}
+
+// ts/report.ts
+var REPORT_FORMAT = 1;
+function percent(v) {
+  return v >= 0 ? jnum(v) : jnull;
+}
+function reportStart(mode, off) {
+  const ignored = [];
+  if (getenv("LOADGUARD_THROTTLE") !== null && !off)
+    ignored.push(jstr("LOADGUARD_THROTTLE"));
+  for (const which of Object.keys(LIMITS))
+    if (getenv(LIMITS[which].env) !== null && limit(which, -1) < 0)
+      ignored.push(jstr(LIMITS[which].env));
+  if (getenv("LOADGUARD_LEARN") !== null && !learnOff())
+    ignored.push(jstr("LOADGUARD_LEARN"));
+  return [["report", jnum(REPORT_FORMAT)], ["mode", jstr(mode)], ["throttle", jbool(!off)], ["ignored", jarr(ignored)]];
+}
+function putLearn(out) {
+  const { state, lessons } = loadLessons();
+  const file = learnedFile();
+  out.push(["learn", jobj([
+    ["on", jbool(!learnOff())],
+    ["file", file === null ? jnull : jstr(file)],
+    ["state", jstr(state)],
+    ["entries", jnum(lessons.length)],
+    ["rss_limit", jnum(limit("learnRss", LEARN_RSS_DEFAULT))]
+  ])]);
+}
+function putRoom(out, root, v, slotLimit) {
+  const limits = [["psi_full", jnum(v.c.psiFull)], ["swap_used", jnum(v.c.swapUsed)]];
+  if (slotLimit)
+    limits.push(["slots", jnum(v.c.slots)]);
+  out.push(["limits", jobj(limits)]);
+  out.push(["pressure", jobj([
+    ["full", percent(v.pr.full)],
+    ["some", percent(psiSome(root))],
+    ["swap", percent(v.pr.swap)],
+    ["zram", percent(zramFill(root))]
+  ])]);
+  out.push(["pressured", jbool(v.pressured)]);
+  out.push(["slots", v.scanned ? jobj([["busy", jnum(v.sl.busy)], ["holders", jarr(v.sl.holders.map(jstr))]]) : jnull]);
+}
+function line(out) {
+  return print(jobj(out)) + `
+`;
+}
+function reportStatus(root) {
+  const v = newVerdict();
+  v.off = throttleOff();
+  const full = noRoom(root, v);
+  if (!v.scanned)
+    v.c.slots = limit("slots", defaultSlots());
+  const out = reportStart("status", v.off);
+  putRoom(out, root, v, true);
+  out.push(["refuse_heavy", jbool(!v.off && full)]);
+  putLearn(out);
+  return line(out);
+}
+function reportExplain(root, payload) {
+  const command = bashCommand(payload);
+  let reason = null;
+  let out;
+  if (command === null) {
+    out = reportStart("explain", throttleOff());
+    out.push(["bash", jbool(false)]);
+  } else {
+    const v = newVerdict();
+    reason = objection(root, command, fromCodex(payload, null), v);
+    out = reportStart("explain", v.off);
+    out.push(["bash", jbool(true)]);
+    out.push(["heavy", v.m === null ? jnull : jstr(v.m.label)]);
+    if (!v.off && v.m !== null)
+      putRoom(out, root, v, v.scanned);
+  }
+  out.push(["decision", jstr(reason !== null ? "deny" : "allow")]);
+  out.push(["reason", reason === null ? jnull : jstr(reason)]);
+  return line(out);
+}
+
+// ts/slot.ts
+import { accessSync as accessSync2, constants as constants5, existsSync as existsSync3, lstatSync, readdirSync as readdirSync3, readFileSync as readFileSync3, statSync as statSync3 } from "fs";
+// package.json
+var package_default = {
+  name: "loadguard",
+  private: true,
+  type: "module",
+  gettyBun: {
+    contractVersion: 1,
+    bunVersion: "1.4.5"
+  },
+  scripts: {
+    build: "bun build --target=bun --outdir=dist ts/driver.ts ts/confine.ts ts/watch.ts ts/cli.ts",
+    "check-dist": "sh ts/check-dist.sh",
+    typecheck: "tsc -p tsconfig.json",
+    test: "bun test ./ts/test/"
+  },
+  devDependencies: {
+    "@types/bun": "1.4.5",
+    typescript: "7.0.2"
+  }
+};
+
+// ts/slot.ts
+var PIN = package_default.gettyBun.bunVersion;
+function store(environ) {
+  let home;
+  const getty = environ["GETTY_HOME"];
+  if (getty !== undefined) {
+    if (!getty.startsWith("/"))
+      return { error: `GETTY_HOME must be an absolute path, got '${getty}'` };
+    home = getty;
+  } else {
+    const h = environ["HOME"] ?? "";
+    if (!h.startsWith("/"))
+      return { error: "HOME is not an absolute path; set GETTY_HOME to an absolute path" };
+    home = h + "/.getty";
+  }
+  if (/[\x00-\x1f\x7f]/.test(home))
+    return { error: "GETTY_HOME contains control characters" };
+  while (home !== "/" && home.endsWith("/"))
+    home = home.slice(0, -1);
+  return { home };
+}
+function hasAvx2(root) {
+  let text;
+  try {
+    text = readFileSync3(root + "/proc/cpuinfo", "latin1");
+  } catch {
+    return false;
+  }
+  for (const line of text.split(`
+`))
+    if (line.startsWith("flags") && line.includes(":"))
+      return (" " + line.slice(line.indexOf(":") + 1) + " ").includes(" avx2 ");
+  return false;
+}
+function target(root, platform, arch) {
+  const a = arch === "x64" ? "x64" : arch === "arm64" ? "aarch64" : arch;
+  if (platform !== "linux")
+    return { error: `unsupported target ${platform}-${a}` };
+  const ld = a === "x64" ? "/lib64/ld-linux-x86-64.so.2" : a === "aarch64" ? "/lib/ld-linux-aarch64.so.1" : null;
+  if (ld === null)
+    return { error: `unsupported target linux-${a}` };
+  if (!existsSync3(root + ld)) {
+    let musl;
+    try {
+      musl = readdirSync3(root + "/lib").find((f) => /^ld-musl-.*\.so\.1$/.test(f));
+    } catch {
+      musl = undefined;
+    }
+    if (musl !== undefined)
+      return { error: `unsupported target linux-${a}-musl (musl libc /lib/${musl}, no glibc ${ld})` };
+  }
+  return { target: a === "x64" && !hasAvx2(root) ? "linux-x64-baseline" : `linux-${a}` };
+}
+function state(slot, pin, tgt) {
+  let present = existsSync3(slot);
+  if (!present) {
+    try {
+      lstatSync(slot);
+      present = true;
+    } catch {
+      present = false;
+    }
+  }
+  if (!present)
+    return "missing";
+  try {
+    const receipt = slot + "/receipt.json", bun = slot + "/bin/bun";
+    if (!statSync3(receipt).isFile() || !statSync3(bun).isFile() || statSync3(bun).size === 0)
+      return "mismatch";
+    accessSync2(receipt, constants5.R_OK);
+    accessSync2(bun, constants5.X_OK);
+    const lines = readFileSync3(receipt, "utf8").split(`
+`);
+    return lines[0] === "{" && lines[1] === `  "version": "${pin}",` && lines[2] === `  "target": "${tgt}",` ? "ready" : "mismatch";
+  } catch {
+    return "mismatch";
+  }
+}
+function findSlot(environ, root = "", platform = process.platform, arch = process.arch) {
+  const s = store(environ);
+  if ("error" in s)
+    return s;
+  const t = target(root, platform, arch);
+  if ("error" in t)
+    return t;
+  const slot = `${s.home === "/" ? "" : s.home}/runtimes/bun/${PIN}/${t.target}`;
+  return { slot, target: t.target, state: state(slot, PIN, t.target) };
+}
+
+// ts/commands.ts
+var REPORT_FORMAT2 = 1;
+var LABEL = 9;
+function doc(bytes) {
+  const d = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(toBuffer(bytes)));
+  if (typeof d !== "object" || d === null || d.report !== REPORT_FORMAT2)
+    throw new Error("no report: " + bytes);
+  return d;
+}
+function payload(command) {
+  return jobj([
+    ["hook_event_name", jstr("PreToolUse")],
+    ["tool_name", jstr("Bash")],
+    ["tool_input", jobj([["command", jstr(command)]])]
+  ]);
+}
+var NONPRINTABLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+function hex(c, n) {
+  return c.toString(16).padStart(n, "0");
+}
+function backslash(c) {
+  return c <= 255 ? "\\x" + hex(c, 2) : c <= 65535 ? "\\u" + hex(c, 4) : "\\U" + hex(c, 8);
+}
+function pyRepr(s) {
+  const q = s.includes("'") && !s.includes('"') ? '"' : "'";
+  let out = q;
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (ch === q || ch === "\\")
+      out += "\\" + ch;
+    else if (ch === "\t")
+      out += "\\t";
+    else if (ch === `
+`)
+      out += "\\n";
+    else if (ch === "\r")
+      out += "\\r";
+    else if (c < 32 || c === 127)
+      out += "\\x" + hex(c, 2);
+    else if (c > 127 && NONPRINTABLE.test(ch))
+      out += backslash(c);
+    else
+      out += ch;
+  }
+  return out + q;
+}
+function d(n) {
+  return String(Math.trunc(n));
+}
+function plural(n) {
+  return n === 1 ? "" : "s";
+}
+function session(root, start) {
+  try {
+    const [pid] = findSession(root, start);
+    return [pid, pid ? cgroup(root, pid) : null];
+  } catch (e) {
+    if (e instanceof PyError)
+      return [null, null];
+    throw e;
+  }
+}
+function scopeOf(path) {
+  for (const part of (path ?? "").split("/"))
+    if (inLoadguardScope(part))
+      return part;
+  return null;
+}
+function sessionText(pid, path) {
+  if (pid === null)
+    return "not run from a Claude Code or Codex session";
+  const scope = scopeOf(path);
+  if (scope !== null)
+    return "confined in " + scope;
+  return `not confined (cgroup ${path ?? "n/a"})`;
+}
+function rows(label, lines) {
+  return lines.map((line, i) => (i === 0 ? (label + ":").padEnd(LABEL) : " ".repeat(LABEL)) + line);
+}
+function percent2(value, digits = 0) {
+  return value === null ? "n/a" : fixed(value, digits) + "%";
+}
+function memory(doc) {
+  const { pressure: p, limits: lim } = doc;
+  let text = `PSI full ${percent2(p.full, 2)} (limit ${d(lim.psi_full)}%), some ${percent2(p.some, 2)}; ` + `swap ${percent2(p.swap)} used (limit ${d(lim.swap_used)}%)`;
+  if (p.zram !== null)
+    text += `; zram ${d(p.zram)}% full`;
+  return text;
+}
+function slotLines(doc) {
+  const slots = doc.slots;
+  if (slots === null)
+    return [
+      "not scanned: under memory pressure the hook reads no other",
+      "process (that can stall on swap); pressure alone refuses"
+    ];
+  const lines = [`${d(slots.busy)}/${d(doc.limits.slots)} heavy busy`, ...slots.holders];
+  if (slots.busy > slots.holders.length)
+    lines.push(`+${d(slots.busy - slots.holders.length)} more`);
+  return lines;
+}
+function ignoredLines(names, environ) {
+  return names.map((name) => {
+    const value = pyRepr(environ[name] ?? "");
+    return ["LOADGUARD_THROTTLE", "LOADGUARD_CONFINE", "LOADGUARD_LEARN"].includes(name) ? `${name}=${value} changes nothing: only 0 turns it off` : `${name}=${value} is not valid: the default applies`;
+  });
+}
+function heavyNow(doc) {
+  if (!doc.throttle)
+    return "never refused: LOADGUARD_THROTTLE=0";
+  if (!doc.refuse_heavy)
+    return "a heavy command would run now";
+  return `a heavy command would be refused now (${doc.pressured ? "memory pressure" : "all heavy slots busy"})`;
+}
+function formatStatus(doc, environ, sessionLine, hookLine) {
+  return [
+    ...rows("memory", [memory(doc)]),
+    ...rows("slots", slotLines(doc)),
+    ...rows("heavy", [heavyNow(doc)]),
+    ...rows("ignored", ignoredLines(doc.ignored, environ)),
+    ...rows("session", [sessionLine]),
+    ...rows("hook", [hookLine])
+  ];
+}
+function formatExplain(doc, environ) {
+  const lines = rows("ignored", ignoredLines(doc.ignored, environ));
+  if (!doc.bash)
+    return [...lines, ...rows("verdict", ["allow: not a Bash payload the hook can read; it passes it through"])];
+  if (!doc.throttle) {
+    lines.push(...rows("heavy", ["not checked: LOADGUARD_THROTTLE=0"]));
+  } else if (doc.heavy === null) {
+    lines.push(...rows("heavy", ["no: no heavy pattern, not learned; a light command is never refused"]));
+  } else {
+    lines.push(...rows("heavy", [`yes (${doc.heavy})`]), ...rows("memory", [memory(doc)]), ...rows("slots", slotLines(doc)));
+  }
+  if (doc.decision === "deny")
+    return [...lines, ...rows("verdict", ["deny; the model is told:", ...(doc.reason ?? "").split(`
+`)])];
+  return [...lines, ...rows("verdict", ["allow: the hook stays silent, the command runs"])];
+}
+function status(c) {
+  const here = sessionText(...session(c.root, c.start));
+  const lines = formatStatus(doc(reportStatus(c.root)), c.environ, here, `decided in-process by ${c.self}, the hook's own code`);
+  return { rc: 0, stdout: lines.join(`
+`) + `
+`, stderr: "" };
+}
+function explain(c, command) {
+  const lines = formatExplain(doc(reportExplain(c.root, payload(command))), c.environ);
+  return { rc: 0, stdout: lines.join(`
+`) + `
+`, stderr: "" };
+}
+function shown(text) {
+  let out = "";
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    if (ch === "\\")
+      out += "\\\\";
+    else if (ch === `
+`)
+      out += "\\n";
+    else if (ch === "\t")
+      out += "\\t";
+    else if (c < 32 || c === 127)
+      out += "\\x" + hex(c, 2);
+    else if (c < 128)
+      out += ch;
+    else
+      out += backslash(c);
+  }
+  return out;
+}
+function homeShort(path, environ) {
+  const home = environ["HOME"] ?? "";
+  if (home.length > 1 && (path === home || path.startsWith(home + "/")))
+    return "~" + path.slice(home.length);
+  return path;
+}
+function size(n) {
+  return n >= 2 ** 30 ? fixed(n / 2 ** 30, 1) + " GiB" : d(Math.floor(n / 2 ** 20)) + " MiB";
+}
+function entryLines(n, entry, environ) {
+  const raw = entry["peak_rss"], peak = typeof raw === "boolean" ? Number(raw) : raw;
+  const last = entry["last_seen"], cwd = entry["cwd"];
+  let head = `${String(n).padStart(3)}  ${typeof peak === "number" && peak > 0 ? size(peak) : "? MiB"}  last ` + (typeof last === "string" ? shown(Array.from(last).slice(0, 10).join("")) : "?");
+  if (typeof cwd === "string" && cwd !== "")
+    head += "  in " + shown(homeShort(cwd, environ));
+  return [head, "     " + shown(entry["command"])];
+}
+function learned(environ) {
+  const path = listPath(environ);
+  if (path === null)
+    return { rc: 1, stdout: `learned: no list: neither $XDG_STATE_HOME nor $HOME is an absolute path
+`, stderr: "" };
+  const [entries, problem] = read3(path);
+  const lines = [];
+  if (disabled(environ))
+    lines.push("learning is off (LOADGUARD_LEARN=0): the hook ignores this list");
+  if (problem === "too-large") {
+    lines.push(`${path} is larger than ${MAX_BYTES} bytes: the hook ignores it; \`loadguard forget all\` clears it`);
+  } else if (problem !== null) {
+    lines.push(`${path} cannot be read: ${problem}`);
+  } else if (entries.length === 0) {
+    lines.push(`no learned commands (${path})`);
+  } else {
+    lines.push(`${entries.length} learned command${plural(entries.length)} in ${path}; each exact text is heavy:`);
+    entries.forEach((entry, i) => lines.push(...entryLines(i + 1, entry, environ)));
+  }
+  return { rc: problem !== null ? 1 : 0, stdout: lines.join(`
+`) + `
+`, stderr: "" };
+}
+function forget2(environ, args) {
+  const path = listPath(environ);
+  if (path === null)
+    return { rc: 1, stdout: `forget: no list: neither $XDG_STATE_HOME nor $HOME is an absolute path
+`, stderr: "" };
+  let numbers;
+  if (args.length === 1 && args[0] === "all")
+    numbers = null;
+  else if (args.every((a) => /^[1-9][0-9]{0,5}$/.test(a)))
+    numbers = [...new Set(args.map(Number))].sort((a, b) => a - b);
+  else
+    return usage(2);
+  let dropped;
+  try {
+    dropped = forget(path, numbers);
+  } catch (e) {
+    const text = e instanceof ForgetError ? e.message : strerror(e);
+    return { rc: 1, stdout: `forget: ${text}; nothing changed
+`, stderr: "" };
+  }
+  const lines = dropped.length === 0 ? [`nothing to forget (${path})`] : [];
+  for (const entry of dropped)
+    lines.push("forgot: " + shown(entry["command"]));
+  return { rc: 0, stdout: lines.join(`
+`) + `
+`, stderr: "" };
+}
+function asOSError(f, otherwise) {
+  try {
+    return f();
+  } catch (e) {
+    if (e instanceof PyError && e.kind === "OSError")
+      return otherwise;
+    throw e;
+  }
+}
+function confineIgnored(environ) {
+  const names = [];
+  if ("LOADGUARD_CONFINE" in environ && environ["LOADGUARD_CONFINE"] !== "0")
+    names.push("LOADGUARD_CONFINE");
+  for (const [, name, , lo, hi] of DEFAULTS)
+    if (name in environ && envInt2(environ, name, -1, lo, hi) === -1)
+      names.push(name);
+  return names;
+}
+function stage1(c) {
+  const environ = c.environ, off = environ["LOADGUARD_CONFINE"] === "0";
+  const bad = off ? "--" : "FAIL";
+  const out = [];
+  const v2 = asOSError(() => cgroup(c.root, c.me) !== null, false);
+  out.push(v2 ? ["ok", "cgroup v2", null] : [bad, "no cgroup v2", "confinement needs the unified hierarchy"]);
+  const runtimeDir = userBus(environ), busctl = findBusctl(environ);
+  out.push(runtimeDir !== null && busctl !== null ? ["ok", `user bus in ${runtimeDir}, ${busctl}`, null] : [
+    bad,
+    runtimeDir === null ? "no user bus ($XDG_RUNTIME_DIR/bus)" : "no busctl on PATH",
+    "confinement talks to systemd --user"
+  ]);
+  let isDelegated = false;
+  if (runtimeDir !== null) {
+    isDelegated = asOSError(() => delegated(c.root, runtimeDir, c.uid), false);
+    out.push(isDelegated ? ["ok", `memory controller delegated to user@${c.uid}.service`, null] : [bad, `memory controller not delegated to user@${c.uid}.service`, "see " + controllersPath(c.uid)]);
+  } else {
+    out.push(["--", "delegation not checked without a user bus", null]);
+  }
+  const name = userName(c.uid);
+  const user = name ?? String(c.uid);
+  const linger = lingering(c.root, name);
+  out.push(linger ? ["ok", "linger for " + user, null] : [bad, "no linger for " + user, "loginctl enable-linger; without it sessions stay unconfined"]);
+  const lim = asOSError(() => limits(c.root, environ), null);
+  if (lim !== null) {
+    out.push(["ok", "limits " + lim.map(([k, v]) => `${k} ${k === "CPUWeight" ? String(v) : size(Number(v))}`).join(", "), null]);
+  } else {
+    out.push([bad, "no MemTotal in /proc/meminfo", null]);
+  }
+  const works = v2 && runtimeDir !== null && busctl !== null && isDelegated && linger && lim !== null;
+  const [pid, path] = session(c.root, c.start);
+  if (pid === null || scopeOf(path) !== null) {
+    out.push([pid ? "ok" : "--", "this session: " + sessionText(pid, path), null]);
+  } else {
+    out.push([
+      works && !off ? "FAIL" : "--",
+      "this session: " + sessionText(pid, path),
+      works && !off ? "sessions are confined when they start; start a new one" : null
+    ]);
+  }
+  return ["stage 1, confine sessions: " + (off ? "off (LOADGUARD_CONFINE=0)" : works ? "on" : "cannot work here"), out];
+}
+function stage23(rep) {
+  if (!rep.throttle)
+    return ["stage 2/3, refuse heavy commands: off (LOADGUARD_THROTTLE=0)", []];
+  const lim = rep.limits;
+  return ["stage 2/3, refuse heavy commands: on", [[
+    "ok",
+    `limits memory PSI full ${d(lim.psi_full)}%, swap ${d(lim.swap_used)}% used, ${d(lim.slots)} heavy slots`,
+    null
+  ]]];
+}
+function learning(c, rep) {
+  const lrn = rep.learn;
+  if (!lrn.on)
+    return ["learning, heavy by what ran: off (LOADGUARD_LEARN=0)", [["--", "no watcher, the list is ignored", null]]];
+  const out = [];
+  const where = lrn.file;
+  if (where === null) {
+    out.push(["FAIL", "no list: neither $XDG_STATE_HOME nor $HOME is an absolute path", null]);
+  } else if (lrn.state === "ok") {
+    out.push(["ok", `${d(lrn.entries)} learned command${plural(lrn.entries)} in ${where}`, null]);
+  } else if (lrn.state === "none") {
+    out.push(["ok", `no learned commands yet (${where})`, null]);
+  } else {
+    out.push([
+      "FAIL",
+      `${where} is ${lrn.state === "too-large" ? "too large" : "unreadable"}: the hook ignores it`,
+      "loadguard forget all"
+    ]);
+  }
+  const total = asOSError(() => memTotal(c.root), null);
+  out.push(["ok", `a command is learned at ${d(lrn.rss_limit)}% of MemTotal` + (total ? ` (${size(Number(total * BigInt(lrn.rss_limit) / 100n))})` : ""), null]);
+  const scope = scopeOf(session(c.root, c.start)[1]);
+  if (scope === null) {
+    out.push(["--", "no watcher: this session is not confined", null]);
+  } else {
+    const found = watcher(c.environ, scope, c.root);
+    out.push(found ? ["ok", `watcher of this session: pid ${found}`, null] : ["FAIL", "no watcher for this session", "it starts with the session; start a new session"]);
+  }
+  return ["learning, heavy by what ran: on", out];
+}
+function runtime(c) {
+  const out = [];
+  const running = process.versions.bun ?? "none";
+  out.push(running === PIN ? ["ok", `this runs on Bun ${running}, the pin, at ${process.execPath}`, null] : [
+    "FAIL",
+    `this runs on Bun ${running}, the pin is ${PIN} (${process.execPath})`,
+    `the getty-bun starter runs Bun ${PIN}`
+  ]);
+  const slot = findSlot(c.environ, c.root);
+  let state;
+  if ("error" in slot) {
+    state = "cannot work here";
+    out.push(["FAIL", "no getty-bun slot: " + slot.error, "the starter fails the same way"]);
+  } else {
+    state = slot.state;
+    if (slot.state === "ready")
+      out.push(["ok", `getty-bun slot ${slot.slot} ready`, null]);
+    else if (slot.state === "missing")
+      out.push(["--", `no getty-bun slot yet at ${slot.slot}`, "the first hook installs Bun there (one download)"]);
+    else
+      out.push([
+        "FAIL",
+        `getty-bun slot ${slot.slot} does not match the pin ${PIN} ${slot.target}`,
+        "remove that directory; the next hook installs it again"
+      ]);
+  }
+  return [`runtime, Bun ${PIN} from getty-bun: ${state}`, out];
+}
+function doctorSections(c) {
+  const rep = doc(reportStatus(c.root));
+  const sections = [stage1(c), stage23(rep), learning(c, rep), runtime(c)];
+  const names = [...rep.ignored, ...confineIgnored(c.environ)];
+  if (names.length > 0)
+    sections.push(["environment", ignoredLines(names, c.environ).map((line) => ["FAIL", line, null])]);
+  return sections;
+}
+function doctor(c) {
+  const lines = ["loadguard doctor"];
+  let fails = 0;
+  for (const [title, checks] of doctorSections(c)) {
+    lines.push(title);
+    for (const [state, text, hint] of checks) {
+      if (state === "FAIL")
+        fails++;
+      lines.push(`  ${state.padEnd(4)}  ${text}`);
+      if (hint !== null)
+        lines.push("        -> " + hint);
+    }
+  }
+  lines.push(fails === 0 ? "all good" : `${fails} problem${plural(fails)}`);
+  return { rc: fails ? 1 : 0, stdout: lines.join(`
+`) + `
+`, stderr: "" };
+}
+var USAGE = `usage: loadguard status | doctor | explain '<command>' | learned
+                 | forget <n>... | forget all | help
+  status    memory pressure, heavy slots and who holds them, as the hook
+            sees them
+  doctor    can loadguard work here? exit 1 if something is broken
+  explain   what the hook would do with this Bash command now (dry run);
+            without a command it reads one from stdin, the way to pass
+            a command that starts with -
+  learned   commands that once took a lot of memory: their exact text is
+            heavy from then on
+  forget    drop learned commands by their number in \`learned\`, or all
+  help      this text`;
+function usage(rc) {
+  return rc === 0 ? { rc, stdout: USAGE + `
+`, stderr: "" } : { rc, stdout: "", stderr: USAGE + `
+` };
+}
+function fromStdin(raw) {
+  const s = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  return s.endsWith(`
+`) ? s.slice(0, -1) : s;
+}
+async function main(args, stdin, where = {}) {
+  const c = {
+    root: where.root ?? "",
+    uid: where.uid ?? process.getuid?.() ?? -1,
+    me: where.me ?? process.pid,
+    start: where.start ?? process.ppid,
+    self: where.self ?? import.meta.path,
+    environ: process.env
+  };
+  const [cmd, ...rest] = args;
+  if (cmd === "help")
+    return usage(0);
+  if (cmd === "status" && rest.length === 0)
+    return status(c);
+  if (cmd === "doctor" && rest.length === 0)
+    return doctor(c);
+  if (cmd === "explain" && rest.length === 0) {
+    const command = fromStdin(await stdin());
+    return command === "" ? usage(2) : explain(c, command);
+  }
+  if (cmd === "explain" && !rest[0].startsWith("-"))
+    return explain(c, utf8Bytes(rest.join(" ")));
+  if (cmd === "learned" && rest.length === 0)
+    return learned(c.environ);
+  if (cmd === "forget" && rest.length > 0)
+    return forget2(c.environ, rest);
+  return usage(2);
+}
+
 // ts/scope-call.ts
 function props(o) {
   return Object.entries(o);
@@ -2151,32 +2933,8 @@ function scopeCall(text) {
 }
 
 // ts/watcher.ts
-import { closeSync as closeSync3, fsyncSync, ftruncateSync, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync2, readlinkSync as readlinkSync2, renameSync as renameSync2, unlinkSync, writeSync, constants as constants4 } from "fs";
+import { closeSync as closeSync4, fsyncSync as fsyncSync2, ftruncateSync, mkdirSync as mkdirSync3, openSync as openSync4, readFileSync as readFileSync4, readlinkSync as readlinkSync2, renameSync as renameSync3, unlinkSync as unlinkSync2, writeSync as writeSync2, constants as constants6 } from "fs";
 import { setPriority as setPriority2 } from "os";
-
-// ts/lock.ts
-import { spawnSync } from "child_process";
-var LOCK_EX = 2;
-var LOCK_NB = 4;
-var forced = null;
-function flock1(fd, nonBlocking) {
-  try {
-    const r = spawnSync("flock", nonBlocking ? ["-x", "-n", "3"] : ["-x", "3"], {
-      stdio: ["ignore", "ignore", "ignore", fd]
-    });
-    return r.status === 0;
-  } catch {
-    return false;
-  }
-}
-function lockFile(fd, nonBlocking) {
-  const libc = forced === "flock1" ? null : loadLibc();
-  if (libc !== null)
-    return libc.flock(fd, LOCK_EX | (nonBlocking ? LOCK_NB : 0)) === 0;
-  return forced === "ffi" ? false : flock1(fd, nonBlocking);
-}
-
-// ts/watcher.ts
 var TICK_S = 2;
 var RUNS = 16;
 var MAX_DEPTH3 = 64;
@@ -2292,7 +3050,7 @@ function readRss(w, pid) {
 }
 function pageSize() {
   try {
-    const auxv = readFileSync2("/proc/self/auxv");
+    const auxv = readFileSync4("/proc/self/auxv");
     for (let i = 0;i + 16 <= auxv.length; i += 16) {
       const type = auxv.readBigUInt64LE(i);
       if (type === 0n)
@@ -2313,7 +3071,7 @@ function harnessOf(root, pid, comm) {
   }
   return name === "claude" ? 1 /* CLAUDE */ : name === "codex" ? 2 /* CODEX */ : 0 /* ANY */;
 }
-function scopeOf(root, pid) {
+function scopeOf2(root, pid) {
   const raw = slurp(root, "/proc/" + pid + "/cgroup", 4096);
   if (raw === null || raw.length === 0)
     return null;
@@ -2349,11 +3107,11 @@ function makeDirs(file) {
     if (dir[i] !== "/")
       continue;
     try {
-      mkdirSync2(pathOf(dir.slice(0, i)), { mode: 448 });
+      mkdirSync3(pathOf(dir.slice(0, i)), { mode: 448 });
     } catch {}
   }
   try {
-    mkdirSync2(pathOf(dir), { mode: 448 });
+    mkdirSync3(pathOf(dir), { mode: 448 });
     return true;
   } catch (e) {
     return e.code === "EEXIST";
@@ -2373,13 +3131,13 @@ function lastSeen(o) {
 }
 function writeAll(fd, data) {
   for (let off = 0;off < data.length; )
-    off += writeSync(fd, data, off, data.length - off);
+    off += writeSync2(fd, data, off, data.length - off);
 }
 function writeLessons(path, all) {
   const tmp = path + "." + process.pid + ".tmp";
   let fd;
   try {
-    fd = openSync3(pathOf(tmp), constants4.O_WRONLY | constants4.O_CREAT | constants4.O_TRUNC, 384);
+    fd = openSync4(pathOf(tmp), constants6.O_WRONLY | constants6.O_CREAT | constants6.O_TRUNC, 384);
   } catch {
     return;
   }
@@ -2387,33 +3145,33 @@ function writeLessons(path, all) {
   try {
     writeAll(fd, toBuffer(all.map((o) => print(o) + `
 `).join("")));
-    fsyncSync(fd);
+    fsyncSync2(fd);
   } catch {
     ok = false;
   }
   try {
-    closeSync3(fd);
+    closeSync4(fd);
   } catch {
     ok = false;
   }
   try {
     if (!ok)
       throw new Error("write");
-    renameSync2(pathOf(tmp), pathOf(path));
+    renameSync3(pathOf(tmp), pathOf(path));
   } catch {
     try {
-      unlinkSync(pathOf(tmp));
+      unlinkSync2(pathOf(tmp));
     } catch {}
     return;
   }
   const slash = path.lastIndexOf("/");
   if (slash > 0) {
     try {
-      const dfd = openSync3(pathOf(path.slice(0, slash)), constants4.O_RDONLY | constants4.O_DIRECTORY);
+      const dfd = openSync4(pathOf(path.slice(0, slash)), constants6.O_RDONLY | constants6.O_DIRECTORY);
       try {
-        fsyncSync(dfd);
+        fsyncSync2(dfd);
       } finally {
-        closeSync3(dfd);
+        closeSync4(dfd);
       }
     } catch {}
   }
@@ -2427,7 +3185,7 @@ function learnedUpdate(r, now) {
     return;
   let lock;
   try {
-    lock = openSync3(pathOf(lockPath), constants4.O_RDWR | constants4.O_CREAT, 384);
+    lock = openSync4(pathOf(lockPath), constants6.O_RDWR | constants6.O_CREAT, 384);
   } catch {
     return;
   }
@@ -2457,7 +3215,7 @@ function learnedUpdate(r, now) {
     }
     writeLessons(path, all);
   } finally {
-    closeSync3(lock);
+    closeSync4(lock);
   }
 }
 function logRun(w, event, r, why) {
@@ -2606,7 +3364,7 @@ function watchSetup(root, pid, log) {
   const harness = harnessOf(root, pid, st.comm);
   if (harness === 0 /* ANY */)
     return null;
-  const sc = scopeOf(root, pid);
+  const sc = scopeOf2(root, pid);
   if (sc === null)
     return null;
   const buf = slurp(root, "/proc/meminfo", 8192);
@@ -2637,12 +3395,12 @@ function watchLock(scope) {
     return null;
   let fd;
   try {
-    fd = openSync3(pathOf(path), constants4.O_RDWR | constants4.O_CREAT, 384);
+    fd = openSync4(pathOf(path), constants6.O_RDWR | constants6.O_CREAT, 384);
   } catch {
     return null;
   }
   if (!lockFile(fd, true)) {
-    closeSync3(fd);
+    closeSync4(fd);
     return null;
   }
   try {
@@ -2654,9 +3412,9 @@ function watchLock(scope) {
 }
 function watchUnlock(lock) {
   try {
-    unlinkSync(pathOf(lock.path));
+    unlinkSync2(pathOf(lock.path));
   } catch {}
-  closeSync3(lock.fd);
+  closeSync4(lock.fd);
 }
 function watch(arg) {
   const { v, end } = strtol(arg, 0);
@@ -2718,6 +3476,11 @@ if (args.length === 1 && mode === "--report") {
   out = reportStatus("");
 } else if (args.length === 1 && mode === "scope-call") {
   out = utf8Bytes(scopeCall(await Bun.stdin.text()));
+} else if (args.length >= 4 && mode === "cli") {
+  const r = await main(args.slice(4), async () => new Uint8Array(await Bun.stdin.arrayBuffer()), { root: args[1], start: Number(args[2]), me: Number(args[3]) });
+  await Bun.write(Bun.stdout, r.stdout);
+  await Bun.write(Bun.stderr, r.stderr);
+  rc = r.rc;
 } else {
   const buf = await readAll(Bun.stdin.stream());
   const payload = buf === null ? null : parsePayload(buf);

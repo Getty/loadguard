@@ -24,6 +24,12 @@
 // lib/loadguard/confine.py and learn.start_watcher):
 //   scope-call     {"fn": NAME, "args": [...]} on stdin: the function's
 //                  result as JSON {"value": ...}, or {"raise": KIND}
+// and for the parity harness of ts/commands.ts (the port of
+// lib/loadguard/cli.py):
+//   cli ROOT START ME ARG...
+//                  bin/loadguard ARG... with /proc, /sys and /var below
+//                  ROOT, the session searched from START, ME as this
+//                  process: its stdout, stderr and exit code
 // Exit 1 if a Bash payload is needed and missing, 64 on usage.
 import { type Bytes, fixed, toBuffer, utf8Bytes } from "./bytes.js";
 import { Harness, heavyCommand, MAX_WORDS, shellCommand } from "./classify.js";
@@ -31,6 +37,7 @@ import { children, get, str } from "./cjson.js";
 import { hook } from "./decide.js";
 import { readPressure, zramFill } from "./measure.js";
 import { bashCommand, parsePayload, readAll } from "./payload.js";
+import { main as cli } from "./commands.js";
 import { reportExplain, reportStatus } from "./report.js";
 import { scopeCall } from "./scope-call.js";
 import { scanSlots } from "./slots.js";
@@ -74,6 +81,12 @@ if (args.length === 1 && mode === "--report") {
   out = reportStatus("");
 } else if (args.length === 1 && mode === "scope-call") {
   out = utf8Bytes(scopeCall(await Bun.stdin.text()));
+} else if (args.length >= 4 && mode === "cli") {
+  const r = await cli(args.slice(4), async () => new Uint8Array(await Bun.stdin.arrayBuffer()),
+    { root: args[1] as string, start: Number(args[2]), me: Number(args[3]) });
+  await Bun.write(Bun.stdout, r.stdout);
+  await Bun.write(Bun.stderr, r.stderr);
+  rc = r.rc;
 } else {
   const buf = await readAll(Bun.stdin.stream());
   const payload = buf === null ? null : parsePayload(buf);

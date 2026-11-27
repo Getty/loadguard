@@ -82,7 +82,7 @@ function pySplitlines(s: string): string[] {
 }
 
 /** int() of a token (ASCII digits, one "_" between digits allowed). */
-function pyInt(s: string): number {
+export function pyInt(s: string): number {
   const t = pyStrip(s);
   if (!/^[+-]?[0-9](?:_?[0-9])*$/.test(t)) throw new PyError("ValueError", "invalid literal for int(): " + s);
   return Number(BigInt(t.replace(/_/g, "")));
@@ -149,7 +149,7 @@ export function memTotal(root: string): bigint | null {
 }
 
 /** An integer from the environment (a trailing % allowed), else def. */
-function envInt(environ: Environ, name: string, def: number, lo: number, hi: number): number {
+export function envInt(environ: Environ, name: string, def: number, lo: number, hi: number): number {
   const m = /^([0-9]+)%?$/.exec(environ[name] ?? "");
   if (m !== null) {
     const n = BigInt(m[1] as string);
@@ -393,7 +393,7 @@ export function waitAttached(root: string, pid: number, name: string, confirmS =
 }
 
 /** $XDG_RUNTIME_DIR if the user bus socket is in it, else null. */
-function userBus(environ: Environ): string | null {
+export function userBus(environ: Environ): string | null {
   const runtimeDir = environ["XDG_RUNTIME_DIR"] ?? "";
   return runtimeDir.startsWith("/") && existsSync(pyJoin(runtimeDir, "bus")) ? runtimeDir : null;
 }

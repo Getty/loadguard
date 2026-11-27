@@ -13,7 +13,8 @@ function loadLibc() {
   try {
     const lib = dlopen("libc.so.6", {
       flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr }
+      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr },
+      strerror: { args: [FFIType.i32], returns: FFIType.cstring }
     });
     libc = {
       flock: (fd, op) => lib.symbols.flock(fd, op),
@@ -23,7 +24,8 @@ function loadLibc() {
           return null;
         const name = read.ptr(pw, 0);
         return name === 0 ? null : new CString(name).toString();
-      }
+      },
+      strerror: (errno) => String(lib.symbols.strerror(errno))
     };
   } catch {
     libc = null;
