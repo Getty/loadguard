@@ -1,0 +1,27 @@
+---
+claimed_at: 2026-11-27T15:51:04Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T15:51:01Z
+created: 2026-11-27T15:35:50Z
+id: 28
+priority: medium
+started: 2026-11-27T15:51:01Z
+status: done
+tags:
+- getty-bun
+- k11
+- tests
+title: bun:test helpers leak their temp dirs
+updated: 2026-11-27T15:51:04Z
+---
+
+Found during k22 review: ts/test/helpers.ts registers afterAll() at module top level to remove tempDir() scratch dirs, but the dirs survive every bun test run (513 loadguard-bun-* dirs in the temp dir after part B's runs). Also check whether the Python suite leaves loadguard-learn-*, loadguard-parity-*, loadguard-throttle-* behind. Fix the cleanup; add a check that a test run leaves no scratch dir.
+
+2026-11-27 15:37 Reproduced: one bun test run with a private TMPDIR leaves 57 loadguard-bun-* dirs. Cause: helpers.ts is one module instance shared by all test files, so its top-level afterAll binds to the first importing file only; a process exit hook does not fire under bun:test 1.4.5 either (tried: 64 left). Fix: helpers exports cleanup() (drains the list), each scratch-making file runs afterAll(cleanup). Regression: t/test_bun_scratch.py (static + 2-file bun run under private TMPDIR), fails on old code, passes now.
+
+2026-11-27 15:44 Also found (not fixed, outside k28): t/ under a longer private TMPDIR fails 4 tests (test_learn.Watch + test_parity.Watch: test_codex_session, test_the_json_data_case; learned cwd ''), also on HEAD. Cause: src/loadguard-hook.c start_run() char path[64] (and the one at ~2179) for '<root>/proc/<pid>/cwd' — truncated when the test-driver root exceeds ~45 chars. Production root is empty, so test-only; passes with TMPDIR=/tmp.
+
+2026-11-27 15:47 Done: helpers.ts exports cleanup() (drains scratch list) instead of a module-level afterAll; cli/decide/watcher.test.ts run afterAll(cleanup). New t/test_bun_scratch.py: static check (every *.test.ts using tempDir/tree runs afterAll(cleanup)) + bun test cli+decide under private TMPDIR must leave it empty (~1.8 s, skipped without Bun); both fail on the old helpers. Python suite leaves no scratch (private TMPDIR, complete run). Verified: typecheck rc 0; bun test ./ts/test/ 59 pass 0 fail, 0 dirs left; check-dist: dist matches, unchanged; python3 -m unittest discover -s t (Bun on PATH): 595 OK, 1 skipped (test_all_live_incidents_parse: no load-incidents dir on host). Removed 513 loadguard-bun-* + 1 each learn/parity/throttle from /tmp (all today, no test process running).
+
+2026-11-27 15:51 Committed as c4b926b
