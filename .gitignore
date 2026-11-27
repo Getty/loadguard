@@ -11,3 +11,6 @@ build/
 
 # Claude Code worktrees (claude --worktree / isolated agents) -- never commit
 /.claude/worktrees/
+
+# Bun build inputs are resolved here, never on user machines (dist/ is committed)
+/node_modules/

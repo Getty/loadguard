@@ -1,0 +1,6 @@
+# Package scripts run tsc, whose bin has a `#!/usr/bin/env node` shebang. This makes
+# `node` resolve to Bun itself, also where a Node is installed, so typecheck, build and
+# test need only the pinned Bun. The starters run the bundle with an empty --config:
+# this file never reaches a hook.
+[run]
+bun = true
