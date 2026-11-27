@@ -1,0 +1,21 @@
+---
+block_reason: Waits on k20 (hook entry on the SDK codecs), which waits on the SDK
+  0.1.0 on npm.
+blocked: true
+class: standard
+created: 2026-11-27T14:08:12Z
+depends_on:
+- 24
+- 25
+- 26
+id: 27
+priority: high
+status: todo
+tags:
+- getty-bun
+- k11
+title: B11 Release notes and the update path
+updated: 2026-11-27T14:08:31Z
+---
+
+Changes under {{$NEXT}} only, no version: Python, gcc and winlaunch gone; first start downloads Bun (~103 MB slot); Codex asks for hook trust again; the deviations from L1 and L2 (exit 1 as fail-open, 5 s timeouts vs. 600 s contract). Marketplace only after Getty's go.
