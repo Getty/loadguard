@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-11-27T14:49:58Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T14:49:58Z
+created: 2026-11-27T14:07:36Z
+depends_on:
+- 18
+id: 19
+priority: high
+started: 2026-11-27T14:49:58Z
+status: done
+tags:
+- getty-bun
+- k11
+title: B3 Port the decision logic to TS with a parity harness
+updated: 2026-11-27T14:50:01Z
+---
+
+Classifier, lexer, shell wrappers, measurement, slot scan, limits, reason texts, learned-list reader, report and explain modes. TS driver analogous to -DLOADGUARD_TEST. Python suite drives every fixture through C and TS and demands equal output (oracle until the switch). New tests in bun:test (L5 a).
+
+2026-11-27 14:23 Started B3. Plan: TS modules under ts/ mirroring the C sections (classifier/lexer/wrappers, measurement, learned-list reader, slot scan, decision + texts, report/explain), operating on bytes (latin1 strings) so C truncations and UTF-8 cuts match; exact printf/cJSON number formatting. Parity harness: t/test_parity.py re-runs the existing driver-based test classes with every C driver call mirrored through dist/driver.js and compared on exit code, stdout and stderr. Driver mode 'watch' belongs to the watcher (B5) and is left out here.
+
+2026-11-27 14:36 Stage 1 done: ts/{bytes,cjson,payload,classify,measure,learned,env,slots,decide,report}.ts + driver modes command/heavy/measure/slots/decide/report/explain/extract (+ --report/--explain on the live host). JSON via a cJSON 1.7.19 port (not JSON.parse): first duplicate key wins, lone surrogates fail, escaped NUL cuts the string, bytes <= 32 are whitespace, nesting limit 1000. printf %.Nf/%g and cJSON number printing exact (BigInt decimal expansion, ties to even): JS toFixed would print full=10.3 where C prints 10.2. t/test_parity.py: 11 driver-based classes of test_throttle/test_learn/test_hook_binary re-run with every C driver call mirrored through dist/driver.js (~1700 comparisons, rc+stdout+stderr), plus Edges (odd JSON, figures, procs, learned lists) - all equal. Next: bun:test port, full verification.
+
+2026-11-27 14:46 Done. Ported: ts/bytes.ts (C strings as byte strings, valid_utf8, strtoull/strtod, exact printf %.Nf/%g), ts/cjson.ts (cJSON 1.7.19 parse/get/print port), ts/payload.ts, ts/classify.ts (classify, heavy_command lexer, claude_eval, shell_command, split_argv), ts/measure.ts (slurp, PSI, meminfo, zram; root prefix as in C), ts/learned.ts (reader: state_file, O_NONBLOCK+fstat read, ≤1 MiB/≤256 lines, labels), ts/slots.ts (scan_slots, process_kind, describe, sanitize), ts/decide.ts (limits, texts incl. Codex spelling, under_pressure/no_room/objection/situation/hook), ts/report.ts (--report/--explain JSON), ts/driver.ts (modes command/heavy/measure/slots/decide/report/explain/extract + --report/--explain). Not ported: driver mode watch (B5). Parity: t/test_parity.py re-runs 11 driver-based classes of test_throttle/test_learn/test_hook_binary with every C driver call mirrored through dist/driver.js (rc+stdout+stderr equal), plus Edges (odd JSON, figures, procs, learned lists, production --explain) and Harness (TS really answers; a difference fails); each class fails if it compared nothing. No parity difference left; resolved on the way: JSON.parse -> cJSON port; toFixed -> exact half-even printf (C prints full=10.2 for 10.25). bun:test: ts/test/{helpers,classify.test,decide.test}.ts (33 tests incl. k18's). Verified (Bun 1.4.5, caches in /tmp): build ok, check-dist equal, typecheck 0, bun test 33 pass 0 fail, nice python3 -m unittest discover -s t 457 OK (1 skipped: ~/load-incidents absent). Mutation check: a dropped prefix + PSI default 11 failed 8 bun tests and 69 parity checks. Findings: (1) test_parity skips without Bun ( or bun on PATH) - today's CI has none, so parity runs locally until B8; (2) Bun's process.env decodes UTF-8, so a non-UTF-8 HOME/XDG_STATE_HOME cannot be byte-exact (untested, C-only); (3) C quirks kept for parity: an invalid \uXXXX escape reads as U+0000 and cuts the string; a /proc entry named 0106 is read under /proc/106. (4) Full python suite now ~132 s (parity ~85 s of it).
+
+Committed as 8ac45a7
