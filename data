@@ -1,0 +1,28 @@
+---
+claimed_at: 2026-11-27T14:21:10Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T14:21:07Z
+created: 2026-11-27T14:07:33Z
+depends_on:
+- 17
+id: 18
+priority: high
+started: 2026-11-27T14:21:07Z
+status: done
+tags:
+- getty-bun
+- k11
+title: B2 TypeScript build scaffold
+updated: 2026-11-27T14:21:10Z
+---
+
+package.json with gettyBun {contractVersion 1, bunVersion 1.4.5}; bun build --target=bun into dist/ (committed); check-dist = rebuild + cmp; typecheck; bun.lock. SDK @getty/agent-bun-runtime 0.1.0 is NOT on npm (404 on 2026-11-27): build without the SDK for now, no git pin, no local tarball.
+
+2026-11-27 14:15 Started B2. SDK still 404 on npm -> scaffold without it. Layout: TS sources under ts/ (src/ holds the C hook, lib/ the Python); first entry = TS test driver (ts/driver.ts, 'command' mode = payload extraction ported from read_stdin/valid_utf8/parse_payload/bash_tool_input), B3 grows it.
+
+2026-11-27 14:19 SDK: bun info @getty/agent-bun-runtime@0.1.0 -> 404 again today; left out of package.json entirely. It is added (exact 0.1.0, devDependency) when Getty publishes 0.1.0; B4 stays blocked on that. Also found: Bun writes its runtime transpiler cache to ~/.bun/install/cache/@t@ regardless of BUN_INSTALL_CACHE_DIR/XDG_CACHE_HOME; set BUN_INSTALL=<tmp> and BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 for every bun call (six cache files I had written there were removed). Byte stability checked on ONE machine only: two builds in different temp dirs/HOMEs/paths (one with space and non-ASCII) -> cmp equal, sha256 5aa3b7fa...b69b; a second machine is B8 CI. Choice (mine): dist/driver.js ships the test driver so B3's parity harness drives the bundle as the starters run it; B7 may drop it from the shipped plugin. Parity gaps left for B3: JSON.parse vs cJSON on duplicate keys (last vs first wins) and lone-surrogate escapes (\ud800 accepted by JSON.parse, rejected by cJSON).
+
+2026-11-27 14:19 Done: package.json (private, module, gettyBun {1, 1.4.5} checked against requirement.schema.json rules, devDeps @types/bun 1.4.5 + typescript 7.0.2 exact as the provider; scripts build/check-dist/typecheck/test), bun.lock, bunfig.toml ([run] bun=true, no Node needed), tsconfig.json (provider's strict set, include ts), .gitignore /node_modules/, ts/payload.ts + ts/driver.ts (driver 'command' mode ported from the C -DLOADGUARD_TEST driver), ts/check-dist.sh, ts/test/driver.test.ts, dist/driver.js. Verified on Bun 1.4.5: typecheck 0 (a planted type error fails it), bun test 5 pass 0 fail, check-dist 0 (fails on a changed byte and on an extra file), frozen install clean, python suite 334 OK (1 skipped: ~/load-incidents absent).
+
+Committed as bf2ce6e
