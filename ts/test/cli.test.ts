@@ -4,13 +4,15 @@
 // section of doctor (the getty-bun slot, read-only), the watcher check of the
 // TS watcher, Python's repr and the escaping of learned commands. Every
 // GETTY_HOME, HOME and state directory is a temporary one.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { main, pyRepr, shown, USAGE } from "../commands.js";
 import { watcher } from "../learnlist.js";
 import { findSlot, PIN } from "../slot.js";
-import { addProcess, CALM, ROOT, tempDir, THRASH, tree, write } from "./helpers.js";
+import { addProcess, CALM, cleanup, ROOT, tempDir, THRASH, tree, write } from "./helpers.js";
+
+afterAll(cleanup);
 
 const CLI = join(ROOT, "dist", "cli.js");
 const NO_STDIN = async (): Promise<Uint8Array> => new Uint8Array();

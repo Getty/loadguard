@@ -3,12 +3,14 @@
 // Codex spellings, the report modes and the learned list. The cases of
 // t/test_throttle.py and t/test_learn.py that carry the design; the Python
 // suite keeps the rest and the C oracle until the switch (B7).
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
-  baseEnv, CALM, driver, encoder, fixtureJson, json, payload, reason, tempDir, THRASH, tree, write,
+  baseEnv, CALM, cleanup, driver, encoder, fixtureJson, json, payload, reason, tempDir, THRASH, tree, write,
 } from "./helpers.js";
+
+afterAll(cleanup);
 
 const WAIT = "\nWait and retry later; light commands (git status, ls, cat) still run.";
 const ADVICE = ". Heavy commands refused until it eases: prove, make test, builds, new claude -p/--bg. " +

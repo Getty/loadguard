@@ -4,7 +4,6 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterAll } from "bun:test";
 import { controllersPath, findBusctl } from "../scope.js";
 
 export const ROOT = join(import.meta.dir, "..", "..");
@@ -17,10 +16,14 @@ export const SLICE_CGROUP =
 const DRIVER = join(ROOT, "dist", "driver.js");
 const encoder = new TextEncoder();
 
+// One module instance serves every test file: an afterAll() here binds to the
+// file that imported it first and misses the rest, and bun:test emits no
+// process "exit" (k28). Every file that makes scratch runs afterAll(cleanup).
 const scratch: string[] = [];
-afterAll(() => {
-  for (const d of scratch) rmSync(d, { recursive: true, force: true });
-});
+
+export function cleanup(): void {
+  for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
+}
 
 export function tempDir(): string {
   const d = mkdtempSync(join(tmpdir(), "loadguard-bun-"));

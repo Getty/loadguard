@@ -5,12 +5,14 @@
 // tick of the session, the scope with it, never spinning. No load: nothing
 // gets near the limit. The fixture suite runs against the C watcher through
 // t/test_parity.py.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { attach, startScope, waitAttached } from "../scope.js";
 import { forceLockImpl, lockFile } from "../lock.js";
-import { addProcess, baseEnv, driver, gone, realScopeBusctl, ROOT, tempDir, write } from "./helpers.js";
+import { addProcess, baseEnv, cleanup, driver, gone, realScopeBusctl, ROOT, tempDir, write } from "./helpers.js";
+
+afterAll(cleanup);
 
 const WATCH_JS = join(ROOT, "dist", "watch.js");
 const GIB = 1n << 30n;
