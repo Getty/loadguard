@@ -1,0 +1,19 @@
+---
+block_reason: Waits on k20 (hook entry on the SDK codecs), which waits on the SDK
+  0.1.0 on npm.
+blocked: true
+class: standard
+created: 2026-11-27T14:08:05Z
+depends_on:
+- 23
+id: 25
+priority: high
+status: todo
+tags:
+- getty-bun
+- k11
+title: B9 Live check and latency script
+updated: 2026-11-27T14:08:25Z
+---
+
+Live check on agent-lab in a temp HOME (L6): claude -p --plugin-dir and Codex with own CODEX_HOME; deny, context, LF, confine, watcher. Deliver a measurement script for reuben that needs only fixtures and the bundled entry: median and p90 warm, a cold run as option. The reuben measurement itself is the hub's, after the AVX2 fix in 0.2.0.
