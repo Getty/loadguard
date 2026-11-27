@@ -6,6 +6,7 @@ skills:
   - loadguard-core
   - loadguard-harness
   - kanban-issues-karr-ticket
+  - getty-bun-integration
 ---
 
 You are the loadguard-worker for **loadguard, a Claude Code plugin that confines and
