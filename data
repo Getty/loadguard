@@ -1,0 +1,19 @@
+---
+block_reason: Waits on k20 (hook entry on the SDK codecs), which waits on the SDK
+  0.1.0 on npm.
+blocked: true
+class: standard
+created: 2026-11-27T14:08:09Z
+depends_on:
+- 23
+id: 26
+priority: high
+status: todo
+tags:
+- getty-bun
+- k11
+title: B10 Rewrite the repo's truths for Bun
+updated: 2026-11-27T14:08:28Z
+---
+
+CLAUDE.md layout; loadguard-rules.md (stack line, new hazards: starter copy never by hand, SDK exit 1, timeouts); loadguard-core and loadguard-harness skills; loadguard-worker.md verification command; docs/design.md Language and build. README prose by the main session.
