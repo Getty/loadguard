@@ -1,0 +1,21 @@
+---
+block_reason: Waits on k20 (hook entry on the SDK codecs), which waits on the SDK
+  0.1.0 on npm.
+blocked: true
+class: standard
+created: 2026-11-27T14:07:59Z
+depends_on:
+- 20
+- 21
+- 22
+id: 23
+priority: high
+status: todo
+tags:
+- getty-bun
+- k11
+title: B7 Switch the plugin to the getty-bun starters
+updated: 2026-11-27T14:08:18Z
+---
+
+bootstrap/ from the render getty-bun-install@v0.1.0 (bun 1.4.5), never edited by hand; hooks.json for Claude Code only, shell form with Linux guard (L4); 5 s on PreToolUse and UserPromptSubmit, install in the async SessionStart with 600 s (L2) - the deviation from the contract (600 s on every starter hook) is documented in the repo and the release notes; codex-hooks.json with no-op commandWindows; Codex manifest; remove C, cJSON, lib/, build, winlaunch, .exe; Makefile.
