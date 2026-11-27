@@ -1,0 +1,24 @@
+---
+claimed_at: 2026-11-27T14:14:13Z
+claimed_by: loadguard-worker
+class: standard
+completed: 2026-11-27T14:14:11Z
+created: 2026-11-27T14:07:23Z
+id: 17
+priority: high
+started: 2026-11-27T14:14:11Z
+status: done
+tags:
+- getty-bun
+- k11
+title: B1 Install the getty-bun consumer skills
+updated: 2026-11-27T14:14:13Z
+---
+
+Hub card agent-developer k11, part B. .claude/skilletor.json: source agent-bun-runtime@v0.1.0 (git), vars.bun_version 1.4.5, skills getty-bun, getty-bun-install, getty-bun-integration; trust, sync. Add getty-bun-integration to skills: of loadguard-worker.md.
+
+2026-11-27 14:12 skilletor: PATH stub and plugin 0.9.0 (3641b4b12c7b) fall to the retired Perl port (no Node on PATH, no pinned binary); ran the 0.9.0 plugin launcher with nvm Node v24.19.0 prepended to PATH. Tag v0.1.0 checked remotely (b808c29). Source entry uses path=skills (provider contract.md). Var name bun_version confirmed in getty-bun-install/bootstrap/*.njk.
+
+2026-11-27 14:12 Done: .claude/skilletor.json gets source agent-bun-runtime (git, ref v0.1.0, path skills), vars.bun_version 1.4.5, skills getty-bun, getty-bun-install, getty-bun-integration; loadguard-worker.md skills: + getty-bun-integration. trust + sync --scope project ran; skilletor check: up to date. Verified: the three skill dirs equal git archive v0.1.0 skills/ except the .njk starters, whose renders are byte-identical to v0.1.0:bootstrap/getty-bun.{sh,ps1} (pin 1.4.5 substituted). git status: only the two files. Tests: 334 OK, 1 skipped (load-incidents absent). Also found: sync installed getty-git-usage (getty-house bundle) and reported conflicts on pre-existing unlocked items (getty-git-commit-style, kanban-issues-karr-ticket, 4 .local rules) - not forced. Global writes under ~/.claude/skilletor (trust.json, cache, state json).
+
+Committed as eb6f1c9 on getty-bun, not pushed. Tests: 334 OK, 1 skip (load-incidents missing).
